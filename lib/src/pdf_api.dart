@@ -7,6 +7,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:vector_math/vector_math_64.dart' hide Colors;
 
 // The trick to support Flutter Web is to use conditional import
 // Both of the files define PdfDocumentFactoryImpl class but only one of them is imported.
@@ -550,6 +551,9 @@ abstract class PdfPageText {
   /// Full text of the page.
   String get fullText;
 
+  /// Bounds corresponding to characters in the full text.
+  List<PdfRect> get charRects;
+
   /// Get text fragments that organizes the full text structure.
   ///
   /// The [fullText] is the composed result of all fragments' text.
@@ -565,7 +569,14 @@ abstract class PdfPageText {
     if (textIndex == fullText.length) {
       return fragments.length; // the end of the text
     }
-    final index = fragments.lowerBound(_PdfPageTextFragmentForSearch(textIndex), (a, b) => a.index - b.index);
+    final searchIndex = PdfPageTextFragment(
+      pageText: this,
+      index: textIndex,
+      length: 0,
+      bounds: PdfRect.empty,
+      charRects: const [],
+    );
+    final index = fragments.lowerBound(searchIndex, (a, b) => a.index - b.index);
     if (index > fragments.length) {
       return -1; // range error
     }
@@ -582,6 +593,49 @@ abstract class PdfPageText {
       return index - 1;
     }
     return index;
+  }
+
+  /// Guess the text direction of the specified range.
+  PdfTextDirection guessTextDirectionOfRange(int start, int end) {
+    if (start < 0 || start >= fullText.length) {
+      throw RangeError.range(start, 0, fullText.length, 'start', 'Invalid start index');
+    }
+    if (end < start || end > fullText.length) {
+      throw RangeError.range(end, start, fullText.length, 'end', 'Invalid end index');
+    }
+    final scores = <int, int>{};
+    for (int i = start; i < end;) {
+      final ln = fullText.indexOf('\n', i);
+      final end = ln < 0 ? fullText.length : ln;
+      final dir = _getLineDirection(i, end);
+      if (dir != PdfTextDirection.unknown) {
+        scores[dir.index] = (scores[dir.index] ?? 0) + (end - i);
+      }
+      i = end + 1;
+    }
+    int maxScore = 0;
+    PdfTextDirection maxDir = PdfTextDirection.unknown;
+    for (int i = 0; i < PdfTextDirection.values.length; i++) {
+      final score = scores[i] ?? 0;
+      if (score > maxScore) {
+        maxScore = score;
+        maxDir = PdfTextDirection.values[i];
+      }
+    }
+    return maxDir;
+  }
+
+  PdfTextDirection _getLineDirection(int start, int end) {
+    if (start == end || start + 1 == end) return PdfTextDirection.unknown;
+    return _vector2direction(charRects[start].center.differenceTo(charRects[end - 1].center));
+  }
+
+  static PdfTextDirection _vector2direction(Vector2 v) {
+    if (v.x.abs() > v.y.abs()) {
+      return v.x > 0 ? PdfTextDirection.ltr : PdfTextDirection.rtl;
+    } else {
+      return PdfTextDirection.vrtl;
+    }
   }
 
   /// Search text with [pattern].
@@ -610,25 +664,44 @@ abstract class PdfPageText {
   }
 }
 
+/// Text direction in PDF page.
+///
+/// - [ltr]: left to right
+/// - [rtl]: right to left
+/// - [vrtl]: vertical (top to bottom), right to left.
+/// - [unknown]: unknown direction, e.g., no text or no text direction can be determined.
+enum PdfTextDirection { ltr, rtl, vrtl, unknown }
+
 /// Text fragment in PDF page.
-abstract class PdfPageTextFragment {
+class PdfPageTextFragment {
+  PdfPageTextFragment({
+    required this.pageText,
+    required this.index,
+    required this.length,
+    required this.bounds,
+    required this.charRects,
+  });
+
+  /// Owner of the fragment.
+  final PdfPageText pageText;
+
   /// Fragment's index on [PdfPageText.fullText]; [text] is the substring of [PdfPageText.fullText] at [index].
-  int get index;
+  final int index;
 
   /// Length of the text fragment.
-  int get length;
+  final int length;
 
   /// End index of the text fragment on [PdfPageText.fullText].
   int get end => index + length;
 
   /// Bounds of the text fragment in PDF page coordinates.
-  PdfRect get bounds;
+  final PdfRect bounds;
 
   /// Fragment's child character bounding boxes in PDF page coordinates.
-  List<PdfRect> get charRects;
+  final List<PdfRect> charRects;
 
   /// Text for the fragment.
-  String get text;
+  String get text => pageText.fullText.substring(index, index + length);
 
   /// Get the bounds of the subrange of the text fragment.
   ///
@@ -669,48 +742,22 @@ abstract class PdfPageTextFragment {
 
   @override
   int get hashCode => index.hashCode ^ bounds.hashCode ^ text.hashCode;
-
-  /// Create a [PdfPageTextFragment].
-  static PdfPageTextFragment fromParams(int index, int length, PdfRect bounds, String text, List<PdfRect> charRects) =>
-      _PdfPageTextFragment(index, length, bounds, text, charRects);
 }
 
-class _PdfPageTextFragment extends PdfPageTextFragment {
-  _PdfPageTextFragment(this.index, this.length, this.bounds, this.text, this.charRects);
+/// Text range in a PDF page, which is typically used to describe text selection.
+class PdfPageTextRange {
+  /// Create a [PdfPageTextRange].
+  ///
+  /// [start] is inclusive and [end] is exclusive.
+  const PdfPageTextRange({required this.pageText, required this.start, required this.end});
 
-  @override
-  final int index;
-  @override
-  final int length;
-  @override
-  final PdfRect bounds;
-  @override
-  final List<PdfRect> charRects;
-  @override
-  final String text;
-}
+  /// Create a [PdfPageTextRange] from two character indices.
+  ///
+  /// Unlike `end` in [PdfTextRangeWithFragments], both [a] and [b] are inclusive.
+  PdfPageTextRange.fromAB(int a, int b, {required this.pageText}) : start = min(a, b), end = max(a, b) + 1;
 
-/// Used only for searching fragments with [lowerBound].
-class _PdfPageTextFragmentForSearch extends PdfPageTextFragment {
-  _PdfPageTextFragmentForSearch(this.index);
-  @override
-  final int index;
-  @override
-  int get length => throw UnimplementedError();
-  @override
-  PdfRect get bounds => throw UnimplementedError();
-  @override
-  String get text => throw UnimplementedError();
-  @override
-  List<PdfRect> get charRects => throw UnimplementedError();
-}
-
-/// Simple text range in a PDF page.
-///
-/// The text range is used to describe text selection in a page but it does not indicate the actual page text;
-/// [PdfTextRanges] contains multiple [PdfTextRange]s and the actual [PdfPageText] the ranges are associated with.
-class PdfTextRange {
-  const PdfTextRange({required this.start, required this.end});
+  /// The page text the text range are associated with.
+  final PdfPageText pageText;
 
   /// Text start index in [PdfPageText.fullText].
   final int start;
@@ -718,81 +765,31 @@ class PdfTextRange {
   /// Text end index in [PdfPageText.fullText].
   final int end;
 
-  PdfTextRange copyWith({int? start, int? end}) => PdfTextRange(start: start ?? this.start, end: end ?? this.end);
-
-  @override
-  int get hashCode => start ^ end.hashCode;
-
-  @override
-  bool operator ==(Object other) {
-    return other is PdfTextRange && other.start == start && other.end == end;
-  }
-
-  @override
-  String toString() => '[$start $end]';
+  /// Page number of the text range.
+  int get pageNumber => pageText.pageNumber;
 
   /// Convert to [PdfTextRangeWithFragments].
   ///
-  /// The method is used to convert [PdfTextRange] to [PdfTextRangeWithFragments] using [PdfPageText].
-  PdfTextRangeWithFragments? toTextRangeWithFragments(PdfPageText pageText) =>
+  /// The method is used to convert [PdfPageTextRange] to [PdfTextRangeWithFragments].
+  PdfTextRangeWithFragments? toTextRangeWithFragments() =>
       PdfTextRangeWithFragments.fromTextRange(pageText, start, end);
+
+  /// Bounds of the text range.
+  PdfRect get bounds => toTextRangeWithFragments()!.bounds;
+
+  /// The composed text of the text range.
+  String get text => pageText.fullText.substring(start, end);
 }
-
-extension PdfTextRangeListExt on List<PdfTextRange> {
-  void appendRange(PdfTextRange range) {
-    if (isNotEmpty && range.start >= last.start && range.start <= last.end) {
-      last = PdfTextRange(start: last.start, end: range.end);
-    } else {
-      add(range);
-    }
-  }
-
-  void appendAllRanges(Iterable<PdfTextRange> ranges) {
-    for (final r in ranges) {
-      appendRange(r);
-    }
-  }
-}
-
-/// Text ranges in a PDF page typically used to describe text selection.
-class PdfTextRanges {
-  /// Create a [PdfTextRanges].
-  const PdfTextRanges({required this.pageText, required this.ranges});
-
-  /// Create a [PdfTextRanges] with empty ranges.
-  PdfTextRanges.createEmpty(this.pageText) : ranges = <PdfTextRange>[];
-
-  /// The page text the text ranges are associated with.
-  final PdfPageText pageText;
-
-  /// Text ranges.
-  final List<PdfTextRange> ranges;
-
-  /// Determine whether the text ranges are empty.
-  bool get isEmpty => ranges.isEmpty;
-
-  /// Determine whether the text ranges are *NOT* empty.
-  bool get isNotEmpty => ranges.isNotEmpty;
-
-  /// Page number of the text ranges.
-  int get pageNumber => pageText.pageNumber;
-
-  /// Bounds of the text ranges.
-  PdfRect get bounds => ranges.map((r) => r.toTextRangeWithFragments(pageText)!.bounds).boundingRect();
-
-  /// The composed text of the text ranges.
-  String get text => ranges.map((r) => pageText.fullText.substring(r.start, r.end)).join();
-}
-
-/// For backward compatibility; [PdfTextRangeWithFragments] is previously named [PdfTextMatch].
-typedef PdfTextMatch = PdfTextRangeWithFragments;
 
 /// Text range (start/end index) in PDF page and it's associated text and bounding rectangle.
 class PdfTextRangeWithFragments {
-  PdfTextRangeWithFragments(this.pageNumber, this.fragments, this.start, this.end, this.bounds);
+  PdfTextRangeWithFragments(this.fragments, this.start, this.end, this.bounds);
 
   /// Page number of the page.
-  final int pageNumber;
+  int get pageNumber => fragments.first.pageText.pageNumber;
+
+  /// Page text of the page.
+  PdfPageText get pageText => fragments.first.pageText;
 
   /// Fragments that contains the text.
   final List<PdfPageTextFragment> fragments;
@@ -873,7 +870,6 @@ class PdfTextRangeWithFragments {
     final sf = pageText.fragments[s];
     if (start + 1 == end) {
       return PdfTextRangeWithFragments(
-        pageText.pageNumber,
         [pageText.fragments[s]],
         start - sf.index,
         end - sf.index,
@@ -884,7 +880,6 @@ class PdfTextRangeWithFragments {
     final l = pageText.getFragmentIndexForTextIndex(end);
     if (s == l) {
       return PdfTextRangeWithFragments(
-        pageText.pageNumber,
         [pageText.fragments[s]],
         start - sf.index,
         end - sf.index,
@@ -898,7 +893,6 @@ class PdfTextRangeWithFragments {
     }
     if (l == pageText.fragments.length) {
       return PdfTextRangeWithFragments(
-        pageText.pageNumber,
         pageText.fragments.sublist(s),
         start - sf.index,
         pageText.fragments.last.length,
@@ -913,7 +907,6 @@ class PdfTextRangeWithFragments {
     }
 
     return PdfTextRangeWithFragments(
-      pageText.pageNumber,
       pageText.fragments.sublist(s, containLastFragment ? l + 1 : l),
       start - sf.index,
       containLastFragment ? end - lf.index : end - pageText.fragments[l - 1].index,
@@ -943,7 +936,11 @@ class PdfTextRangeWithFragments {
 /// The unit is normally in points (1/72 inch).
 @immutable
 class PdfRect {
-  const PdfRect(this.left, this.top, this.right, this.bottom);
+  const PdfRect(double x1, double y1, double x2, double y2)
+    : left = x1 < x2 ? x1 : x2,
+      top = y1 > y2 ? y1 : y2,
+      right = x1 > x2 ? x1 : x2,
+      bottom = y1 < y2 ? y1 : y2;
 
   /// Left coordinate.
   final double left;
@@ -1001,6 +998,15 @@ class PdfRect {
   /// Determine whether the rectangle contains the specified point (in the PDF page coordinates).
   bool containsPoint(PdfPoint offset, {double margin = 0}) => containsXy(offset.x, offset.y, margin: margin);
 
+  double distanceSquaredTo(PdfPoint point) {
+    if (containsPoint(point)) {
+      return 0.0; // inside the rectangle
+    }
+    final dx = point.x.clamp(left, right) - point.x;
+    final dy = point.y.clamp(bottom, top) - point.y;
+    return dx * dx + dy * dy;
+  }
+
   /// Determine whether the rectangle overlaps the specified rectangle (in the PDF page coordinates).
   bool overlaps(PdfRect other) {
     return left < other.right &&
@@ -1028,7 +1034,7 @@ class PdfRect {
   }
 
   ///  Convert to [Rect] in Flutter coordinate using [pageRect] as the page's bounding rectangle.
-  Rect toRectInPageRect({required PdfPage page, required Rect pageRect}) =>
+  Rect toRectInDocument({required PdfPage page, required Rect pageRect}) =>
       toRect(page: page, scaledPageSize: pageRect.size).translate(pageRect.left, pageRect.top);
 
   /// Rotate the rectangle.
@@ -1255,6 +1261,9 @@ class PdfPoint {
   /// Y coordinate.
   final double y;
 
+  /// Calculate the vector to another point.
+  Vector2 differenceTo(PdfPoint other) => Vector2(other.x - x, other.y - y);
+
   @override
   String toString() => 'PdfOffset($x, $y)';
 
@@ -1282,6 +1291,12 @@ class PdfPoint {
     final rotated = rotate(rotation ?? page.rotation.index, page);
     final scale = scaledPageSize == null ? 1.0 : scaledPageSize.height / page.height;
     return Offset(rotated.x * scale, (page.height - rotated.y) * scale);
+  }
+
+  Offset toOffsetInDocument({required PdfPage page, required Rect pageRect}) {
+    final rotated = rotate(page.rotation.index, page);
+    final scale = pageRect.height / page.height;
+    return Offset(rotated.x * scale, (page.height - rotated.y) * scale).translate(pageRect.left, pageRect.top);
   }
 
   /// Rotate the point.

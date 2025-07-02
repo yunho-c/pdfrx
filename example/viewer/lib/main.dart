@@ -46,7 +46,7 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
   final outline = ValueNotifier<List<PdfOutlineNode>?>(null);
   final textSearcher = ValueNotifier<PdfTextSearcher?>(null);
   final _markers = <int, List<Marker>>{};
-  List<PdfTextRanges>? textSelections;
+  List<PdfPageTextRange>? textSelections;
 
   void _update() {
     if (mounted) {
@@ -265,13 +265,13 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                                   markers: _markers.values.expand((e) => e).toList(),
                                   onTap: (marker) {
                                     final rect = controller.calcRectForRectInsidePage(
-                                      pageNumber: marker.ranges.pageText.pageNumber,
-                                      rect: marker.ranges.bounds,
+                                      pageNumber: marker.range.pageText.pageNumber,
+                                      rect: marker.range.bounds,
                                     );
                                     controller.ensureVisible(rect);
                                   },
                                   onDeleteTap: (marker) {
-                                    _markers[marker.ranges.pageNumber]!.remove(marker);
+                                    _markers[marker.range.pageNumber]!.remove(marker);
                                     setState(() {});
                                   },
                                 ),
@@ -317,7 +317,11 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                           scrollHorizontallyByMouseWheel: isHorizontalLayout,
                           pageAnchor: isHorizontalLayout ? PdfPageAnchor.left : PdfPageAnchor.top,
                           pageAnchorEnd: isHorizontalLayout ? PdfPageAnchor.right : PdfPageAnchor.bottom,
-                          enableTextSelection: true,
+                          textSelectionParams: PdfTextSelectionParams(
+                            onTextSelectionChange: (textSelection) {
+                              textSelections = textSelection.selectedTextRange;
+                            },
+                          ),
                           useAlternativeFitScaleAsMinScale: false,
                           maxScale: 8,
                           onViewSizeChanged: (viewSize, oldViewSize, controller) {
@@ -435,9 +439,6 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                             outline.value = await document.loadOutline();
                             textSearcher.value = PdfTextSearcher(controller)..addListener(_update);
                           },
-                          onTextSelectionChange: (selections) {
-                            textSelections = selections;
-                          },
                         ),
                       );
                     }),
@@ -459,18 +460,16 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
         ..color = marker.color.withAlpha(100)
         ..style = PaintingStyle.fill;
 
-      for (final range in marker.ranges.ranges) {
-        final f = PdfTextRangeWithFragments.fromTextRange(
-          marker.ranges.pageText,
-          range.start,
-          range.end,
+      final f = PdfTextRangeWithFragments.fromTextRange(
+        marker.range.pageText,
+        marker.range.start,
+        marker.range.end,
+      );
+      if (f != null) {
+        canvas.drawRect(
+          f.bounds.toRectInDocument(page: page, pageRect: pageRect),
+          paint,
         );
-        if (f != null) {
-          canvas.drawRect(
-            f.bounds.toRectInPageRect(page: page, pageRect: pageRect),
-            paint,
-          );
-        }
       }
     }
   }

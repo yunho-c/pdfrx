@@ -4,12 +4,14 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'dart:ui_web' as ui_web;
 
-import 'package:flutter/material.dart' show Colors, immutable;
+import 'package:collection/wrappers.dart';
+import 'package:flutter/material.dart' show Colors;
 import 'package:flutter/services.dart';
 import 'package:synchronized/extension.dart';
 import 'package:web/web.dart' as web;
 
 import '../pdf_api.dart';
+import '../utils/unmodifiable_list.dart';
 
 /// Get [PdfDocumentFactory] backed by PDFium.
 ///
@@ -467,19 +469,32 @@ class _PdfPageWasm extends PdfPage {
       'loadText',
       parameters: {'docHandle': document.document['docHandle'], 'pageIndex': pageNumber - 1},
     );
-    final pageText = _PdfPageTextJs(pageNumber: pageNumber, fullText: result['fullText'], fragments: []);
     final fragmentOffsets = result['fragments'];
-    final charRectsAll = result['charRects'] as List;
+    final charRectsAll = (result['charRects'] as List)
+        .map((rect) {
+          final r = rect as List;
+          return PdfRect(r[0] as double, r[1] as double, r[2] as double, r[3] as double);
+        })
+        .toList(growable: false);
+    final fragments = <PdfPageTextFragment>[];
+    final pageText = _PdfPageTextJs(
+      pageNumber: pageNumber,
+      fullText: result['fullText'],
+      charRects: UnmodifiableListView(charRectsAll),
+      fragments: UnmodifiableListView(fragments),
+    );
     if (fragmentOffsets is List) {
       int pos = 0;
       for (final fragment in fragmentOffsets.map((n) => (n as num).toInt())) {
-        final charRects =
-            charRectsAll.sublist(pos, pos + fragment).map((rect) {
-              final r = rect as List;
-              return PdfRect(r[0] as double, r[1] as double, r[2] as double, r[3] as double);
-            }).toList();
-        pageText.fragments.add(
-          _PdfPageTextFragmentPdfium(pageText, pos, fragment, charRects.boundingRect(), charRects),
+        final charRects = UnmodifiableSublist(charRectsAll, start: pos, end: pos + fragment);
+        fragments.add(
+          PdfPageTextFragment(
+            pageText: pageText,
+            index: pos,
+            length: fragment,
+            bounds: charRects.boundingRect(),
+            charRects: charRects,
+          ),
         );
         pos += fragment;
       }
@@ -559,26 +574,6 @@ class PdfImageWeb extends PdfImage {
   void dispose() {}
 }
 
-@immutable
-class _PdfPageTextFragmentPdfium extends PdfPageTextFragment {
-  _PdfPageTextFragmentPdfium(this.pageText, this.index, this.length, this.bounds, this.charRects);
-
-  final PdfPageText pageText;
-
-  @override
-  final int index;
-  @override
-  final int length;
-  @override
-  int get end => index + length;
-  @override
-  final PdfRect bounds;
-  @override
-  final List<PdfRect> charRects;
-  @override
-  String get text => pageText.fullText.substring(index, index + length);
-}
-
 PdfDest? _pdfDestFromMap(dynamic dest) {
   if (dest == null) return null;
   final params = dest['params'] as List;
@@ -590,13 +585,17 @@ PdfDest? _pdfDestFromMap(dynamic dest) {
 }
 
 class _PdfPageTextJs extends PdfPageText {
-  _PdfPageTextJs({required this.pageNumber, required this.fullText, required this.fragments});
+  _PdfPageTextJs({required this.pageNumber, required this.fullText, required this.charRects, required this.fragments});
 
   @override
   final int pageNumber;
 
   @override
   final String fullText;
+
+  @override
+  final List<PdfRect> charRects;
+
   @override
   final List<PdfPageTextFragment> fragments;
 }

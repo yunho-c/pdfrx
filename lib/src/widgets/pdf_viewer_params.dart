@@ -1,6 +1,8 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../pdfrx.dart';
@@ -26,7 +28,7 @@ class PdfViewerParams {
     this.pageAnchor = PdfPageAnchor.top,
     this.pageAnchorEnd = PdfPageAnchor.bottom,
     this.onePassRenderingScaleThreshold = 200 / 72,
-    this.enableTextSelection = false,
+    this.textSelectionParams,
     this.matchTextColor,
     this.activeMatchTextColor,
     this.pageDropShadow = const BoxShadow(color: Colors.black54, blurRadius: 4, spreadRadius: 2, offset: Offset(2, 2)),
@@ -58,9 +60,6 @@ class PdfViewerParams {
     this.linkWidgetBuilder,
     this.pagePaintCallbacks,
     this.pageBackgroundPaintCallbacks,
-    this.onTextSelectionChange,
-    this.selectableRegionInjector,
-    this.perPageSelectableRegionInjector,
     this.onKey,
     this.keyHandlerParams = const PdfViewerKeyHandlerParams(),
     this.forceReload = false,
@@ -182,17 +181,8 @@ class PdfViewerParams {
   /// If you want more granular control for each page, use [getPageRenderingScale].
   final double onePassRenderingScaleThreshold;
 
-  /// Enable text selection on pages.
-  ///
-  /// The default is false.
-  /// If it is true, the text selection is enabled by injecting [SelectionArea]
-  /// internally.
-  ///
-  /// Basically, you can enable text selection by setting one (or more) of the following parameters:
-  /// - [enableTextSelection] to enable [SelectionArea] on the viewer
-  /// - [selectableRegionInjector] to inject your own [SelectableRegion] on the viewer
-  /// - [perPageSelectableRegionInjector] to inject your own [SelectableRegion] on each page
-  final bool enableTextSelection;
+  /// Parameters for text selection.
+  final PdfTextSelectionParams? textSelectionParams;
 
   /// Color for text search match.
   ///
@@ -360,7 +350,7 @@ class PdfViewerParams {
   /// Add overlays to the viewer.
   ///
   /// This function is to generate widgets on PDF viewer's overlay [Stack].
-  /// The widgets can be layed out using layout widgets such as [Positioned] and [Align].
+  /// The widgets can be laid out using layout widgets such as [Positioned] and [Align].
   ///
   /// The most typical use case is to add scroll thumbs to the viewer.
   /// The following fragment illustrates how to add vertical and horizontal scroll thumbs:
@@ -475,35 +465,6 @@ class PdfViewerParams {
   /// For the detail usage, see [PdfViewerPagePaintCallback].
   final List<PdfViewerPagePaintCallback>? pageBackgroundPaintCallbacks;
 
-  /// Function to be notified when the text selection is changed.
-  final PdfViewerTextSelectionChangeCallback? onTextSelectionChange;
-
-  /// Function to inject [SelectionArea] or [SelectableRegion] to customize text selection.
-  ///
-  /// It can be also used to "remove" the text selection feature by returning the child widget as it is.
-  /// Furthermore, it can be used to customize the text selection feature by returning a custom widget.
-  ///
-  /// Basically, you can enable text selection by setting one (or more) of the following parameters:
-  /// - [enableTextSelection] to enable [SelectionArea] on the viewer
-  /// - [selectableRegionInjector] to inject your own [SelectableRegion] on the viewer
-  /// - [perPageSelectableRegionInjector] to inject your own [SelectableRegion] on each page
-  ///
-  /// You can even enable both of [selectableRegionInjector] and [perPageSelectableRegionInjector] at the same time.
-  final PdfSelectableRegionInjector? selectableRegionInjector;
-
-  /// Function to inject [SelectionArea] or [SelectableRegion] to customize text selection on each page.
-  ///
-  /// It can be also used to "remove" the text selection feature by returning the child widget as it is.
-  /// Furthermore, it can be used to customize the text selection feature by returning a custom widget.
-  ///
-  /// Basically, you can enable text selection by setting one (or more) of the following parameters:
-  /// - [enableTextSelection] to enable [SelectionArea] on the viewer
-  /// - [selectableRegionInjector] to inject your own [SelectableRegion] on the viewer
-  /// - [perPageSelectableRegionInjector] to inject your own [SelectableRegion] on each page
-  ///
-  /// You can even enable both of [selectableRegionInjector] and [perPageSelectableRegionInjector] at the same time.
-  final PdfPerPageSelectableRegionInjector? perPageSelectableRegionInjector;
-
   /// Function to handle key events.
   ///
   /// See [PdfViewerOnKeyCallback] for the details.
@@ -538,7 +499,7 @@ class PdfViewerParams {
         other.pageAnchor != pageAnchor ||
         other.pageAnchorEnd != pageAnchorEnd ||
         other.onePassRenderingScaleThreshold != onePassRenderingScaleThreshold ||
-        other.enableTextSelection != enableTextSelection ||
+        other.textSelectionParams != textSelectionParams ||
         other.matchTextColor != matchTextColor ||
         other.activeMatchTextColor != activeMatchTextColor ||
         other.pageDropShadow != pageDropShadow ||
@@ -570,7 +531,7 @@ class PdfViewerParams {
         other.pageAnchor == pageAnchor &&
         other.pageAnchorEnd == pageAnchorEnd &&
         other.onePassRenderingScaleThreshold == onePassRenderingScaleThreshold &&
-        other.enableTextSelection == enableTextSelection &&
+        other.textSelectionParams == textSelectionParams &&
         other.matchTextColor == matchTextColor &&
         other.activeMatchTextColor == activeMatchTextColor &&
         other.pageDropShadow == pageDropShadow &&
@@ -601,9 +562,6 @@ class PdfViewerParams {
         other.linkWidgetBuilder == linkWidgetBuilder &&
         other.pagePaintCallbacks == pagePaintCallbacks &&
         other.pageBackgroundPaintCallbacks == pageBackgroundPaintCallbacks &&
-        other.onTextSelectionChange == onTextSelectionChange &&
-        other.selectableRegionInjector == selectableRegionInjector &&
-        other.perPageSelectableRegionInjector == perPageSelectableRegionInjector &&
         other.onKey == onKey &&
         other.keyHandlerParams == keyHandlerParams &&
         other.forceReload == forceReload;
@@ -623,7 +581,7 @@ class PdfViewerParams {
         pageAnchor.hashCode ^
         pageAnchorEnd.hashCode ^
         onePassRenderingScaleThreshold.hashCode ^
-        enableTextSelection.hashCode ^
+        textSelectionParams.hashCode ^
         matchTextColor.hashCode ^
         activeMatchTextColor.hashCode ^
         pageDropShadow.hashCode ^
@@ -654,13 +612,142 @@ class PdfViewerParams {
         linkWidgetBuilder.hashCode ^
         pagePaintCallbacks.hashCode ^
         pageBackgroundPaintCallbacks.hashCode ^
-        onTextSelectionChange.hashCode ^
-        selectableRegionInjector.hashCode ^
-        perPageSelectableRegionInjector.hashCode ^
         onKey.hashCode ^
         keyHandlerParams.hashCode ^
         forceReload.hashCode;
   }
+}
+
+/// Parameters for text selection.
+@immutable
+class PdfTextSelectionParams {
+  const PdfTextSelectionParams({
+    this.textSelectionTriggeredBySwipe,
+    this.showSelectionHandles,
+    this.selectionControls,
+    this.buildAdaptiveTextSelectionToolbar,
+    this.onTextSelectionChange,
+    this.textTap,
+    this.textDoubleTap,
+    this.textLongPress,
+  });
+
+  /// Whether text selection is triggered by swipe.
+  ///
+  /// null to determine the behavior based on the platform; enabled on Desktop/Web, disabled on Mobile.
+  final bool? textSelectionTriggeredBySwipe;
+
+  /// Whether to show selection handles.
+  ///
+  /// null to determine the behavior based on the platform; enabled on Mobile, disabled on Desktop/Web.
+  /// It is also affected by the type of [selectionControls]. If [selectionControls] is [desktopTextSelectionControls],
+  /// [emptyTextSelectionControls] or any other [TextSelectionControls] implementations that does not support selection
+  /// handles, nothing is shown even [showSelectionHandles] is true.
+  final bool? showSelectionHandles;
+
+  /// Controls for text selection.
+  ///
+  /// null to determine the behavior based on the platform.
+  /// - [materialTextSelectionControls] for Android
+  /// - [cupertinoTextSelectionControls] for iOS
+  /// - [cupertinoDesktopTextSelectionControls] for macOS
+  /// - [desktopTextSelectionControls] for other platforms
+  ///
+  /// Please note that pdfrx currently only uses the following functions:
+  /// - [TextSelectionControls.buildHandle](https://api.flutter.dev/flutter/widgets/TextSelectionControls/buildHandle.html)
+  /// - [TextSelectionControls.getHandleAnchor](https://api.flutter.dev/flutter/widgets/TextSelectionControls/getHandleAnchor.html)
+  final TextSelectionControls? selectionControls;
+
+  /// Function to build toolbar/context menu for text selection.
+  ///
+  /// - If the function returns null, no toolbar is shown.
+  /// - If the function is null, the default toolbar will be used.
+  ///
+  /// See [AdaptiveTextSelectionToolbar] for more info.
+  final Widget? Function(
+    BuildContext context,
+    SelectionGeometry selectionGeometry,
+    TextSelectionToolbarAnchors anchors,
+    PdfTextSelectionDelegate textSelectionDelegate,
+  )?
+  buildAdaptiveTextSelectionToolbar;
+
+  /// Function to be notified when the text selection is changed.
+  final PdfViewerTextSelectionChangeCallback? onTextSelectionChange;
+
+  /// Function to call when the text is tapped.
+  ///
+  /// By default, tapping on the text resets the text selection.
+  /// You can set empty function to disable the default behavior.
+  final void Function(TapDownDetails details)? textTap;
+
+  /// Function to call when the text is double tapped.
+  ///
+  /// By default, double tapping on the text do nothing.
+  final void Function(TapDownDetails details)? textDoubleTap;
+
+  /// Function to call when the text is long pressed.
+  ///
+  /// By default, long pressing on the text selects the word under the pointer.
+  /// You can set empty function to disable the default behavior.
+  final void Function(LongPressStartDetails details)? textLongPress;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is PdfTextSelectionParams &&
+        other.selectionControls == selectionControls &&
+        other.buildAdaptiveTextSelectionToolbar == buildAdaptiveTextSelectionToolbar &&
+        other.onTextSelectionChange == onTextSelectionChange &&
+        other.textTap == textTap &&
+        other.textDoubleTap == textDoubleTap &&
+        other.textLongPress == textLongPress;
+  }
+
+  @override
+  int get hashCode =>
+      selectionControls.hashCode ^
+      buildAdaptiveTextSelectionToolbar.hashCode ^
+      onTextSelectionChange.hashCode ^
+      textTap.hashCode ^
+      textDoubleTap.hashCode ^
+      textLongPress.hashCode;
+}
+
+/// Text selection
+abstract class PdfTextSelection {
+  /// Whether the copy action is allowed.
+  bool get isCopyAllowed;
+
+  /// Get the selected text.
+  String get selectedText;
+
+  /// Get the selected text range.
+  List<PdfPageTextRange> get selectedTextRange;
+}
+
+/// Delegate for text selection actions.
+abstract class PdfTextSelectionDelegate implements PdfTextSelection {
+  /// Copy the selected text.
+  ///
+  /// Please note that the function does not copy the text if [isCopyAllowed] is false.
+  /// The function returns true if the copy action is successful.
+  Future<bool> copyTextSelection();
+
+  /// Clear the text selection.
+  ///
+  /// By clearing the text selection, the text context menu will be dismissed.
+  Future<void> clearTextSelection();
+
+  /// Select all text.
+  ///
+  /// The function may take some time to complete if the document is large.
+  Future<void> selectAllText();
+
+  /// Select a word at the given position.
+  ///
+  /// Please note that the position is in document coordinates.
+  Future<void> selectWord(Offset position);
 }
 
 /// Function to notify that the document is loaded/changed.
@@ -750,15 +837,6 @@ typedef PdfViewerErrorBannerBuilder =
 /// [size] is the size of the link.
 typedef PdfLinkWidgetBuilder = Widget? Function(BuildContext context, PdfLink link, Size size);
 
-/// Function to inject [SelectionArea] or [SelectableRegion] to customize text selection.
-typedef PdfSelectableRegionInjector = Widget Function(BuildContext context, Widget child);
-
-/// Function to inject [SelectionArea] or [SelectableRegion] to customize text selection on each page.
-///
-/// [pageRect] is the rectangle of the page in the viewer.
-typedef PdfPerPageSelectableRegionInjector =
-    Widget Function(BuildContext context, Widget child, PdfPage page, Rect pageRect);
-
 /// Function to paint things on page.
 ///
 /// [canvas] is the canvas to paint on.
@@ -778,8 +856,8 @@ typedef PdfViewerPagePaintCallback = void Function(ui.Canvas canvas, Rect pageRe
 
 /// Function to be notified when the text selection is changed.
 ///
-/// [selections] contains the selected text ranges on each page.
-typedef PdfViewerTextSelectionChangeCallback = void Function(List<PdfTextRanges> selections);
+/// [textSelection] contains the selected text range on each page.
+typedef PdfViewerTextSelectionChangeCallback = void Function(PdfTextSelection textSelection);
 
 /// When [PdfViewerController.goToPage] is called, the page is aligned to the specified anchor.
 ///

@@ -1,16 +1,17 @@
 // ignore_for_file: public_member_api_docs, sort_constructors_first
 import 'dart:async';
+import 'dart:collection';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:ffi/ffi.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../pdf_api.dart';
+import '../utils/unmodifiable_list.dart';
 import 'pdf_file_cache.dart';
 import 'pdfium_bindings.dart' as pdfium_bindings;
 import 'pdfium_interop.dart';
@@ -919,44 +920,47 @@ class _PdfImagePdfium extends PdfImage {
   }
 }
 
-@immutable
-class _PdfPageTextFragmentPdfium extends PdfPageTextFragment {
-  _PdfPageTextFragmentPdfium(this.pageText, this.index, this.length, this.bounds, this.charRects);
-
-  final PdfPageText pageText;
-
-  @override
-  final int index;
-  @override
-  final int length;
-  @override
-  int get end => index + length;
-  @override
-  final PdfRect bounds;
-  @override
-  final List<PdfRect> charRects;
-  @override
-  String get text => pageText.fullText.substring(index, index + length);
-}
-
 class _PdfPageTextPdfium extends PdfPageText {
-  _PdfPageTextPdfium({required this.pageNumber, required this.fullText, required this.fragments});
+  _PdfPageTextPdfium({
+    required this.pageNumber,
+    required this.fullText,
+    required this.charRects,
+    required this.fragments,
+  });
 
   @override
   final int pageNumber;
 
   @override
   final String fullText;
+
+  @override
+  List<PdfRect> charRects;
+
   @override
   final List<PdfPageTextFragment> fragments;
 
   static Future<_PdfPageTextPdfium> _loadText(_PdfPagePdfium page) async {
     final result = await _load(page);
-    final pageText = _PdfPageTextPdfium(pageNumber: page.pageNumber, fullText: result.fullText, fragments: []);
+    final fragments = <PdfPageTextFragment>[];
+    final pageText = _PdfPageTextPdfium(
+      pageNumber: page.pageNumber,
+      fullText: result.fullText,
+      charRects: UnmodifiableListView(result.charRects),
+      fragments: UnmodifiableListView(fragments),
+    );
     int pos = 0;
     for (final fragment in result.fragments) {
-      final charRects = result.charRects.sublist(pos, pos + fragment);
-      pageText.fragments.add(_PdfPageTextFragmentPdfium(pageText, pos, fragment, charRects.boundingRect(), charRects));
+      final charRects = UnmodifiableSublist(result.charRects, start: pos, end: pos + fragment);
+      fragments.add(
+        PdfPageTextFragment(
+          pageText: pageText,
+          index: pos,
+          length: fragment,
+          bounds: charRects.boundingRect(),
+          charRects: charRects,
+        ),
+      );
       pos += fragment;
     }
     return pageText;
