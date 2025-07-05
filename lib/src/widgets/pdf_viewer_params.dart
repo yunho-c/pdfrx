@@ -40,6 +40,7 @@ class PdfViewerParams {
     this.interactionEndFrictionCoefficient = _kDrag,
     this.onDocumentChanged,
     this.calculateInitialPageNumber,
+    this.calculateInitialZoom,
     this.calculateCurrentPageNumber,
     this.onViewerReady,
     this.onViewSizeChanged,
@@ -274,6 +275,9 @@ class PdfViewerParams {
   ///
   /// It is useful when you want to determine the initial page number based on the document content.
   final PdfViewerCalculateInitialPageNumberFunction? calculateInitialPageNumber;
+
+  /// Function to calculate the initial zoom level.
+  final PdfViewerCalculateZoomFunction? calculateInitialZoom;
 
   /// Function to guess the current page number based on the visible rectangle and page layouts.
   ///
@@ -543,6 +547,7 @@ class PdfViewerParams {
         other.interactionEndFrictionCoefficient == interactionEndFrictionCoefficient &&
         other.onDocumentChanged == onDocumentChanged &&
         other.calculateInitialPageNumber == calculateInitialPageNumber &&
+        other.calculateInitialZoom == calculateInitialZoom &&
         other.calculateCurrentPageNumber == calculateCurrentPageNumber &&
         other.onViewerReady == onViewerReady &&
         other.onViewSizeChanged == onViewSizeChanged &&
@@ -593,6 +598,7 @@ class PdfViewerParams {
         interactionEndFrictionCoefficient.hashCode ^
         onDocumentChanged.hashCode ^
         calculateInitialPageNumber.hashCode ^
+        calculateInitialZoom.hashCode ^
         calculateCurrentPageNumber.hashCode ^
         onViewerReady.hashCode ^
         onViewSizeChanged.hashCode ^
@@ -759,6 +765,15 @@ typedef PdfViewerDocumentChangedCallback = void Function(PdfDocument? document);
 typedef PdfViewerCalculateInitialPageNumberFunction =
     int? Function(PdfDocument document, PdfViewerController controller);
 
+/// Function to calculate the initial zoom level.
+///
+/// If the function returns null, the viewer will use the default zoom level.
+/// You can use the following parameters to calculate the zoom level:
+/// - [fitZoom] is the zoom level to fit the "initial" page into the viewer.
+/// - [coverZoom] is the zoom level to cover the entire viewer with the "initial" page.
+typedef PdfViewerCalculateZoomFunction =
+    double? Function(PdfDocument document, PdfViewerController controller, double fitZoom, double coverZoom);
+
 /// Function to guess the current page number based on the visible rectangle and page layouts.
 typedef PdfViewerCalculateCurrentPageNumberFunction =
     int? Function(Rect visibleRect, List<Rect> pageRects, PdfViewerController controller);
@@ -895,7 +910,12 @@ enum PdfPageAnchor {
 
 /// Parameters to customize link handling/appearance.
 class PdfLinkHandlerParams {
-  const PdfLinkHandlerParams({required this.onLinkTap, this.linkColor, this.customPainter});
+  const PdfLinkHandlerParams({
+    required this.onLinkTap,
+    this.linkColor,
+    this.customPainter,
+    this.enableAutoLinkDetection = true,
+  });
 
   /// Function to be called when the link is tapped.
   ///
@@ -925,16 +945,24 @@ class PdfLinkHandlerParams {
   /// ```
   final PdfLinkCustomPagePainter? customPainter;
 
+  /// Whether to try to detect Web links automatically or not.
+  /// This is useful if the PDF file contains text that looks like Web links but not defined as links in the PDF.
+  /// The default is true.
+  final bool enableAutoLinkDetection;
+
   @override
   bool operator ==(covariant PdfLinkHandlerParams other) {
     if (identical(this, other)) return true;
 
-    return other.onLinkTap == onLinkTap && other.linkColor == linkColor && other.customPainter == customPainter;
+    return other.onLinkTap == onLinkTap &&
+        other.linkColor == linkColor &&
+        other.customPainter == customPainter &&
+        other.enableAutoLinkDetection == enableAutoLinkDetection;
   }
 
   @override
   int get hashCode {
-    return onLinkTap.hashCode ^ linkColor.hashCode ^ customPainter.hashCode;
+    return onLinkTap.hashCode ^ linkColor.hashCode ^ customPainter.hashCode ^ enableAutoLinkDetection.hashCode;
   }
 }
 

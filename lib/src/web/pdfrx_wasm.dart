@@ -7,6 +7,7 @@ import 'dart:ui_web' as ui_web;
 import 'package:collection/wrappers.dart';
 import 'package:flutter/material.dart' show Colors;
 import 'package:flutter/services.dart';
+import 'package:rxdart/rxdart.dart';
 import 'package:synchronized/extension.dart';
 import 'package:web/web.dart' as web;
 
@@ -311,6 +312,7 @@ class _PdfDocumentWasm extends PdfDocument {
   final _PdfDocumentFactoryWasmImpl factory;
   final void Function()? disposeCallback;
   bool isDisposed = false;
+  final subject = BehaviorSubject<PdfDocumentEvent>();
 
   @override
   final PdfPermissions? permissions;
@@ -319,9 +321,13 @@ class _PdfDocumentWasm extends PdfDocument {
   bool get isEncrypted => permissions != null;
 
   @override
+  Stream<PdfDocumentEvent> get events => subject.stream;
+
+  @override
   Future<void> dispose() async {
     if (!isDisposed) {
       isDisposed = true;
+      subject.close();
       await factory.sendCommand('closeDocument', parameters: document);
       disposeCallback?.call();
     }
@@ -371,6 +377,9 @@ class _PdfDocumentWasm extends PdfDocument {
       for (final page in pagesLoaded) {
         pages[page.pageNumber - 1] = page; // Update the existing page
       }
+
+      subject.add(PdfDocumentPageStatusChangedEvent(this, pagesLoaded));
+
       if (onPageLoadProgress != null) {
         if (!await onPageLoadProgress(firstPageIndex, pages.length, data)) {
           // If the callback returns false, stop loading more pages
@@ -437,10 +446,14 @@ class _PdfPageWasm extends PdfPage {
   final _PdfDocumentWasm document;
 
   @override
-  Future<List<PdfLink>> loadLinks({bool compact = false}) async {
+  Future<List<PdfLink>> loadLinks({bool compact = false, bool enableAutoLinkDetection = true}) async {
     final result = await document.factory.sendCommand(
       'loadLinks',
-      parameters: {'docHandle': document.document['docHandle'], 'pageIndex': pageNumber - 1},
+      parameters: {
+        'docHandle': document.document['docHandle'],
+        'pageIndex': pageNumber - 1,
+        'enableAutoLinkDetection': enableAutoLinkDetection,
+      },
     );
     return (result['links'] as List).map((link) {
       if (link is! Map<Object?, dynamic>) {

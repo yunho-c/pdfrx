@@ -197,7 +197,7 @@ class PdfViewer extends StatefulWidget {
 
 class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMixin implements PdfTextSelectionDelegate {
   PdfViewerController? _controller;
-  late final TransformationController _txController = _PdfViewerTransformationController(this);
+  late final _txController = _PdfViewerTransformationController(this);
   late final AnimationController _animController;
   Animation<Matrix4>? _animGoTo;
   int _animationResettingGuard = 0;
@@ -211,6 +211,7 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
   double _minScale = _defaultMinScale;
   int? _pageNumber;
   bool _initialized = false;
+  StreamSubscription<PdfDocumentEvent>? _documentSubscription;
 
   final List<double> _zoomStops = [1.0];
 
@@ -302,7 +303,8 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
 
   void _onDocumentChanged() async {
     _layout = null;
-
+    _documentSubscription?.cancel();
+    _documentSubscription = null;
     _textSelectionChangedThrottleTimer?.cancel();
     _stopInteraction();
     _releaseAllImages();
@@ -330,6 +332,7 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
     _controller ??= widget.controller ?? PdfViewerController();
     _controller!._attach(this);
     _txController.addListener(_onMatrixChanged);
+    _documentSubscription = document.events.listen(_onDocumentEvent);
 
     if (mounted) {
       setState(() {});
@@ -356,7 +359,6 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
     await _document?.loadPagesProgressively((pageNumber, totalPageCount, document) {
       if (document == _document && mounted) {
         debugPrint('PdfViewer: Loaded page $pageNumber of $totalPageCount in ${stopwatch.elapsedMilliseconds} ms');
-        _invalidate();
         return true;
       }
       return false;
@@ -371,6 +373,7 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
 
   @override
   void dispose() {
+    _documentSubscription?.cancel();
     _textSelectionChangedThrottleTimer?.cancel();
     _interactionEndedTimer?.cancel();
     _cancelAllPendingRenderings();
@@ -384,8 +387,15 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
     super.dispose();
   }
 
-  void _onMatrixChanged() {
-    _updateStream.add(_txController.value);
+  void _onMatrixChanged() => _invalidate();
+
+  void _onDocumentEvent(PdfDocumentEvent event) {
+    if (event is PdfDocumentPageStatusChangedEvent) {
+      for (final page in event.pages) {
+        _removeCacheImagesForPage(page.pageNumber);
+      }
+      _invalidate();
+    }
   }
 
   @override
@@ -466,13 +476,13 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
                         ),
                       ),
                     ),
-                    ..._buildPageOverlayWidgets(context),
-                    if (_canvasLinkPainter.isEnabled)
+                    if (_initialized) ..._buildPageOverlayWidgets(context),
+                    if (_initialized && _canvasLinkPainter.isEnabled)
                       SelectionContainer.disabled(child: _canvasLinkPainter.linkHandlingOverlay(_viewSize!)),
-                    if (widget.params.viewerOverlayBuilder != null)
+                    if (_initialized && widget.params.viewerOverlayBuilder != null)
                       ...widget.params.viewerOverlayBuilder!(context, _viewSize!, _canvasLinkPainter._handleLinkTap)
                           .map((e) => SelectionContainer.disabled(child: e)),
-                    ..._placeTextSelectionWidgets(context, isCopyTextEnabled),
+                    if (_initialized) ..._placeTextSelectionWidgets(context, isCopyTextEnabled),
                   ],
                 );
               },
@@ -502,23 +512,27 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
       }
     }
 
-    if (!_initialized && _layout != null) {
+    if (!_initialized && _layout != null && _coverScale != null && _alternativeFitScale != null) {
       _initialized = true;
       Future.microtask(() async {
-        if (mounted) {
-          await _goToPage(pageNumber: _calcInitialPageNumber(), duration: Duration.zero);
-
-          if (mounted && _document != null && _controller != null) {
-            widget.params.onViewerReady?.call(_document!, _controller!);
-          }
-
-          callOnViewerSizeChanged();
+        // forcibly calculate fit scale for the initial page
+        _pageNumber = _gotoTargetPageNumber = _calcInitialPageNumber();
+        _calcCoverFitScale();
+        _calcZoomStopTable();
+        final zoom =
+            widget.params.calculateInitialZoom?.call(_document!, _controller!, _alternativeFitScale!, _coverScale!) ??
+            _coverScale!;
+        await _setZoom(Offset.zero, zoom, duration: Duration.zero);
+        await _goToPage(pageNumber: _pageNumber!, duration: Duration.zero);
+        if (mounted && _document != null && _controller != null) {
+          widget.params.onViewerReady?.call(_document!, _controller!);
         }
+        callOnViewerSizeChanged();
       });
     } else if (isLayoutChanged || isViewSizeChanged) {
       Future.microtask(() async {
         if (mounted) {
-          await _goToPage(pageNumber: currentPageNumber ?? _calcInitialPageNumber(), duration: Duration.zero);
+          await _goToPage(pageNumber: currentPageNumber ?? _calcInitialPageNumber());
           callOnViewerSizeChanged();
         }
       });
@@ -890,6 +904,7 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
 
   /// [_CustomPainter] calls the function to paint PDF pages.
   void _paintPages(ui.Canvas canvas, ui.Size size) {
+    if (!_initialized) return;
     final targetRect = _getCacheExtentRect();
     final scale = MediaQuery.of(context).devicePixelRatio * _currentZoom;
 
@@ -1002,7 +1017,11 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
         final currentPageNumber = _pageNumber;
         if (currentPageNumber != null && currentPageNumber > 0) {
           final currentPage = _document!.pages[currentPageNumber - 1];
-          _removeImagesIfCacheBytesExceedsLimit(unusedPageList, widget.params.maxImageBytesCachedOnMemory, currentPage);
+          _removeCacheImagesIfCacheBytesExceedsLimit(
+            unusedPageList,
+            widget.params.maxImageBytesCachedOnMemory,
+            currentPage,
+          );
         }
       }
     }
@@ -1185,7 +1204,18 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
     return result;
   }
 
-  void _removeImagesIfCacheBytesExceedsLimit(List<int> pageNumbers, int acceptableBytes, PdfPage currentPage) {
+  void _removeCacheImagesForPage(int pageNumber) {
+    final removed = _pageImages.remove(pageNumber);
+    if (removed != null) {
+      removed.image.dispose();
+    }
+    final removedPartial = _pageImagesPartial.remove(pageNumber);
+    if (removedPartial != null) {
+      removedPartial.image.dispose();
+    }
+  }
+
+  void _removeCacheImagesIfCacheBytesExceedsLimit(List<int> pageNumbers, int acceptableBytes, PdfPage currentPage) {
     double dist(int pageNumber) {
       return (_layout!.pageLayouts[pageNumber - 1].center - _layout!.pageLayouts[currentPage.pageNumber - 1].center)
           .distanceSquared;
@@ -1253,7 +1283,6 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
   Matrix4 _calcMatrixFor(Offset position, {required double zoom, required Size viewSize}) {
     final hw = viewSize.width / 2;
     final hh = viewSize.height / 2;
-
     return Matrix4.compose(
       vec.Vector3(-position.dx * zoom + hw, -position.dy * zoom + hh, 0),
       vec.Quaternion.identity(),
@@ -1278,9 +1307,9 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
         margin: margin,
       );
 
-  // The function calculate the rectangle which should be shown in the view.
-  //
-  // If the rect is smaller than the view size, it will
+  /// The function calculate the rectangle which should be shown in the view.
+  ///
+  /// If the rect is smaller than the view size, it will
   Rect _calcRectForArea({required Rect rect, required PdfPageAnchor anchor}) {
     final viewSize = _visibleRect.size;
     final w = min(rect.width, viewSize.width);
@@ -2558,7 +2587,8 @@ class _CanvasLinkPainter {
     synchronized(() async {
       final links = _links[page.pageNumber];
       if (links != null) return links;
-      _links[page.pageNumber] = await page.loadLinks(compact: true);
+      final enableAutoLinkDetection = _state.widget.params.linkHandlerParams?.enableAutoLinkDetection ?? true;
+      _links[page.pageNumber] = await page.loadLinks(compact: true, enableAutoLinkDetection: enableAutoLinkDetection);
       if (onLoaded != null) {
         onLoaded();
       } else {

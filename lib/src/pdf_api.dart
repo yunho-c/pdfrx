@@ -34,10 +34,6 @@ class Pdfrx {
   /// It is not supported on Flutter Web.
   static http.Client Function()? createHttpClient;
 
-  /// pdfrx always uses PDFium (WASM) on Flutter Web and the runtime type is not used now.
-  @Deprecated('PdfrxWebRuntimeType is not used now. pdfrx always uses PDFium (WASM) on Flutter Web.')
-  static PdfrxWebRuntimeType webRuntimeType = PdfrxWebRuntimeType.pdfiumWasm;
-
   /// To override the default pdfium WASM modules directory URL. It must be terminated by '/'.
   static String? pdfiumWasmModulesUrl;
 
@@ -50,16 +46,6 @@ class Pdfrx {
   /// This is useful for authentication on protected servers.
   /// Only supported on Flutter Web.
   static bool pdfiumWasmWithCredentials = false;
-}
-
-/// Web runtime type.
-@Deprecated('PdfrxWebRuntimeType is not working now. pdfrx always uses PDFium (WASM) on Flutter Web.')
-enum PdfrxWebRuntimeType {
-  /// Use PDFium (WASM).
-  pdfiumWasm,
-
-  /// PDF.js is no longer supported.
-  pdfjs,
 }
 
 /// For platform abstraction purpose; use [PdfDocument] instead.
@@ -185,6 +171,9 @@ abstract class PdfDocument {
 
   /// PdfDocument must have [dispose] function.
   Future<void> dispose();
+
+  /// Stream to notify change events in the document.
+  Stream<PdfDocumentEvent> get events;
 
   /// Opening the specified file.
   /// For Web, [filePath] can be relative path from `index.html` or any arbitrary URL but it may be restricted by CORS.
@@ -360,6 +349,32 @@ abstract class PdfDocument {
 
 typedef PdfPageLoadingCallback<T> = FutureOr<bool> Function(int currentPageNumber, int totalPageCount, T? data);
 
+/// PDF document event types.
+enum PdfDocumentEventType { pageStatusChanged }
+
+/// Base class for PDF document events.
+abstract class PdfDocumentEvent {
+  /// Event type.
+  PdfDocumentEventType get type;
+
+  /// Document that this event is related to.
+  PdfDocument get document;
+}
+
+/// Event that is triggered when the status of PDF document pages has changed.
+class PdfDocumentPageStatusChangedEvent implements PdfDocumentEvent {
+  PdfDocumentPageStatusChangedEvent(this.document, this.pages);
+
+  @override
+  PdfDocumentEventType get type => PdfDocumentEventType.pageStatusChanged;
+
+  @override
+  final PdfDocument document;
+
+  /// The pages that have changed.
+  final List<PdfPage> pages;
+}
+
 /// Handles a PDF page in [PdfDocument].
 ///
 /// See [PdfDocument.pages].
@@ -436,9 +451,13 @@ abstract class PdfPage {
 
   /// Load links.
   ///
-  /// if [compact] is true, it tries to reduce memory usage by compacting the link data.
+  /// If [compact] is true, it tries to reduce memory usage by compacting the link data.
   /// See [PdfLink.compact] for more info.
-  Future<List<PdfLink>> loadLinks({bool compact = false});
+  ///
+  /// If [enableAutoLinkDetection] is true, the function tries to detect Web links automatically.
+  /// This is useful if the PDF file contains text that looks like Web links but not defined as links in the PDF.
+  /// The default is true.
+  Future<List<PdfLink>> loadLinks({bool compact = false, bool enableAutoLinkDetection = true});
 }
 
 /// Page rotation.
