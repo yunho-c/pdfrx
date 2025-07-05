@@ -1,6 +1,5 @@
 // ignore_for_file: public_member_api_docs, sort_constructors_first
 import 'dart:async';
-import 'dart:collection';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
@@ -12,7 +11,6 @@ import 'package:flutter/services.dart';
 import 'package:rxdart/rxdart.dart';
 
 import '../pdf_api.dart';
-import '../utils/unmodifiable_list.dart';
 import 'pdf_file_cache.dart';
 import 'pdfium_bindings.dart' as pdfium_bindings;
 import 'pdfium_interop.dart';
@@ -735,7 +733,43 @@ class _PdfPagePdfium extends PdfPage {
   PdfPageRenderCancellationTokenPdfium createCancellationToken() => PdfPageRenderCancellationTokenPdfium(this);
 
   @override
-  Future<PdfPageText> loadText() => _PdfPageTextPdfium._loadText(this);
+  Future<PdfPageRawText?> loadRawText() async {
+    if (document.isDisposed) {
+      return null;
+    }
+    return await (await backgroundWorker).compute(
+      (params) => using((arena) {
+        final doubleSize = sizeOf<Double>();
+        final rectBuffer = arena.allocate<Double>(4 * sizeOf<Double>());
+
+        final doc = pdfium_bindings.FPDF_DOCUMENT.fromAddress(params.docHandle);
+        final page = pdfium.FPDF_LoadPage(doc, params.pageNumber - 1);
+        final textPage = pdfium.FPDFText_LoadPage(page);
+        try {
+          final charCount = pdfium.FPDFText_CountChars(textPage);
+          final charRects = <PdfRect>[];
+          final sb = StringBuffer();
+          for (int i = 0; i < charCount; i++) {
+            sb.writeCharCode(pdfium.FPDFText_GetUnicode(textPage, i));
+            pdfium.FPDFText_GetCharBox(
+              textPage,
+              i,
+              rectBuffer, // L
+              rectBuffer.offset(doubleSize * 2), // R
+              rectBuffer.offset(doubleSize * 3), // B
+              rectBuffer.offset(doubleSize), // T
+            );
+            charRects.add(_rectFromLTRBBuffer(rectBuffer));
+          }
+          return PdfPageRawText(sb.toString(), charRects);
+        } finally {
+          pdfium.FPDFText_ClosePage(textPage);
+          pdfium.FPDF_ClosePage(page);
+        }
+      }),
+      (docHandle: document.document.address, pageNumber: pageNumber),
+    );
+  }
 
   @override
   Future<List<PdfLink>> loadLinks({bool compact = false, bool enableAutoLinkDetection = true}) async {
@@ -932,207 +966,10 @@ class _PdfImagePdfium extends PdfImage {
   }
 }
 
-class _PdfPageTextPdfium extends PdfPageText {
-  _PdfPageTextPdfium({
-    required this.pageNumber,
-    required this.fullText,
-    required this.charRects,
-    required this.fragments,
-  });
-
-  @override
-  final int pageNumber;
-
-  @override
-  final String fullText;
-
-  @override
-  List<PdfRect> charRects;
-
-  @override
-  final List<PdfPageTextFragment> fragments;
-
-  static Future<_PdfPageTextPdfium> _loadText(_PdfPagePdfium page) async {
-    final result = await _load(page);
-    final fragments = <PdfPageTextFragment>[];
-    final pageText = _PdfPageTextPdfium(
-      pageNumber: page.pageNumber,
-      fullText: result.fullText,
-      charRects: UnmodifiableListView(result.charRects),
-      fragments: UnmodifiableListView(fragments),
-    );
-    int pos = 0;
-    for (final fragment in result.fragments) {
-      final charRects = UnmodifiableSublist(result.charRects, start: pos, end: pos + fragment);
-      fragments.add(
-        PdfPageTextFragment(
-          pageText: pageText,
-          index: pos,
-          length: fragment,
-          bounds: charRects.boundingRect(),
-          charRects: charRects,
-        ),
-      );
-      pos += fragment;
-    }
-    return pageText;
-  }
-
-  static Future<({String fullText, List<PdfRect> charRects, List<int> fragments})> _load(_PdfPagePdfium page) async {
-    if (page.document.isDisposed) {
-      return (fullText: '', charRects: <PdfRect>[], fragments: <int>[]);
-    }
-    return await (await backgroundWorker).compute(
-      (params) => using((arena) {
-        final doc = pdfium_bindings.FPDF_DOCUMENT.fromAddress(params.docHandle);
-        final pdfium_bindings.FPDF_PAGE page = pdfium.FPDF_LoadPage(doc, params.pageNumber - 1);
-
-        final textPage = pdfium.FPDFText_LoadPage(page);
-        try {
-          final charCount = pdfium.FPDFText_CountChars(textPage);
-          final charRects = <PdfRect>[];
-          final fragments = <int>[];
-          final fullText = _loadInternal(textPage, 0, charCount, arena, charRects, fragments);
-          return (fullText: fullText, charRects: charRects, fragments: fragments);
-        } finally {
-          pdfium.FPDFText_ClosePage(textPage);
-          pdfium.FPDF_ClosePage(page);
-        }
-      }),
-      (docHandle: page.document.document.address, pageNumber: page.pageNumber),
-    );
-  }
-
-  static const _charLF = 10, _charCR = 13, _charSpace = 32;
-
-  static String _loadInternal(
-    pdfium_bindings.FPDF_TEXTPAGE textPage,
-    int from,
-    int length,
-    Arena arena,
-    List<PdfRect> charRects,
-    List<int> fragments,
-  ) {
-    final fullText = _getText(textPage, from, length, arena);
-    final doubleSize = sizeOf<Double>();
-    final buffer = arena.allocate<Double>(4 * doubleSize);
-    final sb = StringBuffer();
-    int lineStart = 0, wordStart = 0;
-    int? lastChar;
-    for (int i = 0; i < length; i++) {
-      final char = fullText.codeUnitAt(i);
-      if (char == _charCR) {
-        if (i + 1 < length && fullText.codeUnitAt(i + 1) == _charLF) {
-          lastChar = char;
-          continue;
-        }
-      }
-      if (char == _charCR || char == _charLF) {
-        if (_makeLineFlat(charRects, lineStart, sb.length, sb)) {
-          sb.write('\r\n');
-          charRects.appendDummy();
-          charRects.appendDummy();
-          fragments.add(sb.length - wordStart);
-          lineStart = wordStart = sb.length;
-        }
-        lastChar = char;
-        continue;
-      }
-
-      pdfium.FPDFText_GetCharBox(
-        textPage,
-        from + i,
-        buffer, // L
-        buffer.offset(doubleSize * 2), // R
-        buffer.offset(doubleSize * 3), // B
-        buffer.offset(doubleSize), // T
-      );
-      final rect = _rectFromLTRBBuffer(buffer);
-      if (char == _charSpace) {
-        if (lastChar == _charSpace) continue;
-        if (sb.length > wordStart) {
-          fragments.add(sb.length - wordStart);
-        }
-        sb.writeCharCode(char);
-        charRects.add(rect);
-        fragments.add(1);
-        wordStart = sb.length;
-        lastChar = char;
-        continue;
-      }
-
-      if (sb.length > lineStart) {
-        const columnHeightThreshold = 72.0; // 1 inch
-        final prev = charRects.last;
-        if (prev.left > rect.left || prev.bottom + columnHeightThreshold < rect.bottom) {
-          if (_makeLineFlat(charRects, lineStart, sb.length, sb)) {
-            if (sb.length > wordStart) {
-              fragments.add(sb.length - wordStart);
-            }
-            lineStart = wordStart = sb.length;
-          }
-        }
-      }
-
-      sb.writeCharCode(char);
-      charRects.add(rect);
-      lastChar = char;
-    }
-
-    if (_makeLineFlat(charRects, lineStart, sb.length, sb)) {
-      if (sb.length > wordStart) {
-        fragments.add(sb.length - wordStart);
-      }
-    }
-    return sb.toString();
-  }
-
-  /// return true if any meaningful characters in the line (start -> end)
-  static bool _makeLineFlat(List<PdfRect> rects, int start, int end, StringBuffer sb) {
-    if (start >= end) return false;
-    final str = sb.toString();
-    final bounds = rects.skip(start).take(end - start).boundingRect();
-    double? prev;
-    for (int i = start; i < end; i++) {
-      final rect = rects[i];
-      final char = str.codeUnitAt(i);
-      if (char == _charSpace) {
-        final next = i + 1 < end ? rects[i + 1].left : null;
-        rects[i] = PdfRect(prev ?? rect.left, bounds.top, next ?? rect.right, bounds.bottom);
-        prev = null;
-      } else {
-        rects[i] = PdfRect(prev ?? rect.left, bounds.top, rect.right, bounds.bottom);
-        prev = rect.right;
-      }
-    }
-    return true;
-  }
-
-  static String _getText(pdfium_bindings.FPDF_TEXTPAGE textPage, int from, int length, Arena arena) {
-    // Since FPDFText_GetText could not handle '\0' in the middle of the text,
-    // we'd better use FPDFText_GetUnicode to obtain the text here.
-    final count = pdfium.FPDFText_CountChars(textPage);
-    final sb = StringBuffer();
-    for (int i = 0; i < count; i++) {
-      sb.writeCharCode(pdfium.FPDFText_GetUnicode(textPage, i));
-    }
-    return sb.toString();
-  }
-}
-
 PdfRect _rectFromLTRBBuffer(Pointer<Double> buffer) => PdfRect(buffer[0], buffer[1], buffer[2], buffer[3]);
 
 extension _PointerExt<T extends NativeType> on Pointer<T> {
   Pointer<T> offset(int offsetInBytes) => Pointer.fromAddress(address + offsetInBytes);
-}
-
-extension _PdfRectsExt on List<PdfRect> {
-  /// add dummy rect for control characters
-  void appendDummy({double width = 1}) {
-    if (isEmpty) return;
-    final prev = last;
-    add(PdfRect(prev.right, prev.top, prev.right + width, prev.bottom));
-  }
 }
 
 PdfDest? _pdfDestFromDest(pdfium_bindings.FPDF_DEST dest, pdfium_bindings.FPDF_DOCUMENT document, Arena arena) {

@@ -7,7 +7,7 @@ class UnmodifiableSublist<T> extends ListBase<T> {
   /// Please note that the class assumes the underlying list is also unmodifiable.
   /// If the underlying list is modified, the behavior of this class is undefined.
   UnmodifiableSublist(this._list, {int start = 0, int? end})
-    : assert(start >= 0 && start < _list.length && (end == null || end >= start)),
+    : assert(start >= 0 && start <= _list.length && (end == null || end >= start)),
       _start = start,
       length = (end ?? _list.length) - start;
   final List<T> _list;

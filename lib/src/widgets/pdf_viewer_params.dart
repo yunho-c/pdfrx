@@ -1,8 +1,6 @@
 import 'dart:ui' as ui;
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../pdfrx.dart';
@@ -629,13 +627,15 @@ class PdfViewerParams {
 class PdfTextSelectionParams {
   const PdfTextSelectionParams({
     this.textSelectionTriggeredBySwipe,
-    this.showSelectionHandles,
-    this.selectionControls,
-    this.buildAdaptiveTextSelectionToolbar,
+    this.enableSelectionHandles,
+    this.buildContextMenu,
+    this.buildSelectionHandle,
     this.onTextSelectionChange,
     this.textTap,
     this.textDoubleTap,
     this.textLongPress,
+    this.textSecondaryTapUp,
+    this.magnifier,
   });
 
   /// Whether text selection is triggered by swipe.
@@ -646,37 +646,19 @@ class PdfTextSelectionParams {
   /// Whether to show selection handles.
   ///
   /// null to determine the behavior based on the platform; enabled on Mobile, disabled on Desktop/Web.
-  /// It is also affected by the type of [selectionControls]. If [selectionControls] is [desktopTextSelectionControls],
-  /// [emptyTextSelectionControls] or any other [TextSelectionControls] implementations that does not support selection
-  /// handles, nothing is shown even [showSelectionHandles] is true.
-  final bool? showSelectionHandles;
+  final bool? enableSelectionHandles;
 
-  /// Controls for text selection.
+  /// Function to build context menu for text selection.
   ///
-  /// null to determine the behavior based on the platform.
-  /// - [materialTextSelectionControls] for Android
-  /// - [cupertinoTextSelectionControls] for iOS
-  /// - [cupertinoDesktopTextSelectionControls] for macOS
-  /// - [desktopTextSelectionControls] for other platforms
-  ///
-  /// Please note that pdfrx currently only uses the following functions:
-  /// - [TextSelectionControls.buildHandle](https://api.flutter.dev/flutter/widgets/TextSelectionControls/buildHandle.html)
-  /// - [TextSelectionControls.getHandleAnchor](https://api.flutter.dev/flutter/widgets/TextSelectionControls/getHandleAnchor.html)
-  final TextSelectionControls? selectionControls;
+  /// - If the function returns null, no context menu is shown.
+  /// - If the function is null, the default context menu will be used.
+  final PdfViewerTextSelectionContextMenuBuilder? buildContextMenu;
 
-  /// Function to build toolbar/context menu for text selection.
+  /// Function to build anchor handle for text selection.
   ///
-  /// - If the function returns null, no toolbar is shown.
-  /// - If the function is null, the default toolbar will be used.
-  ///
-  /// See [AdaptiveTextSelectionToolbar] for more info.
-  final Widget? Function(
-    BuildContext context,
-    SelectionGeometry selectionGeometry,
-    TextSelectionToolbarAnchors anchors,
-    PdfTextSelectionDelegate textSelectionDelegate,
-  )?
-  buildAdaptiveTextSelectionToolbar;
+  /// - If the function returns null, no anchor handle is shown.
+  /// - If the function is null, the default anchor handle will be used.
+  final PdfViewerTextSelectionAnchorHandleBuilder? buildSelectionHandle;
 
   /// Function to be notified when the text selection is changed.
   final PdfViewerTextSelectionChangeCallback? onTextSelectionChange;
@@ -698,27 +680,72 @@ class PdfTextSelectionParams {
   /// You can set empty function to disable the default behavior.
   final void Function(LongPressStartDetails details)? textLongPress;
 
+  /// Function to call when the text is secondary tapped (right-click).
+  ///
+  /// By default, secondary tap on the text open the context menu.
+  final void Function(TapUpDetails details)? textSecondaryTapUp;
+
+  /// Parameters for the magnifier.
+  final PdfViewerSelectionMagnifierParams? magnifier;
+
   @override
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
     return other is PdfTextSelectionParams &&
-        other.selectionControls == selectionControls &&
-        other.buildAdaptiveTextSelectionToolbar == buildAdaptiveTextSelectionToolbar &&
+        other.textSelectionTriggeredBySwipe == textSelectionTriggeredBySwipe &&
+        other.buildContextMenu == buildContextMenu &&
+        other.buildSelectionHandle == buildSelectionHandle &&
         other.onTextSelectionChange == onTextSelectionChange &&
         other.textTap == textTap &&
         other.textDoubleTap == textDoubleTap &&
-        other.textLongPress == textLongPress;
+        other.textLongPress == textLongPress &&
+        other.textSecondaryTapUp == textSecondaryTapUp &&
+        other.enableSelectionHandles == enableSelectionHandles &&
+        other.magnifier == magnifier;
   }
 
   @override
   int get hashCode =>
-      selectionControls.hashCode ^
-      buildAdaptiveTextSelectionToolbar.hashCode ^
+      textSelectionTriggeredBySwipe.hashCode ^
+      buildContextMenu.hashCode ^
+      buildSelectionHandle.hashCode ^
       onTextSelectionChange.hashCode ^
       textTap.hashCode ^
       textDoubleTap.hashCode ^
-      textLongPress.hashCode;
+      textLongPress.hashCode ^
+      textSecondaryTapUp.hashCode ^
+      enableSelectionHandles.hashCode ^
+      magnifier.hashCode;
 }
+
+/// Function to build the text selection context menu.
+///
+/// [a], [b] are the text selection anchors that represent the selected text range.
+///
+/// [textSelectionDelegate] provides access to the text selection actions such as copy and clear selection.
+/// Please note that the function does not copy the text if [PdfTextSelectionDelegate.isCopyAllowed] is false and
+/// use of [PdfTextSelectionDelegate.selectedText] is also restricted by the same condition.
+///
+/// [rightClickPosition] is the position of the right-click in the document coordinates if available.
+/// [dismissContextMenu] is the function to dismiss the context menu.
+typedef PdfViewerTextSelectionContextMenuBuilder =
+    Widget? Function(
+      BuildContext context,
+      PdfTextSelectionAnchor a,
+      PdfTextSelectionAnchor b,
+      PdfTextSelectionDelegate textSelectionDelegate,
+      Offset? rightClickPosition,
+      void Function() dismissContextMenu,
+    );
+
+/// Function to build the  text  selection anchor handle.
+typedef PdfViewerTextSelectionAnchorHandleBuilder =
+    Widget? Function(BuildContext context, PdfTextSelectionAnchor anchor);
+
+/// Function to be notified when the text selection is changed.
+///
+/// [textSelection] contains the selected text range on each page.
+typedef PdfViewerTextSelectionChangeCallback = void Function(PdfTextSelection textSelection);
 
 /// Text selection
 abstract class PdfTextSelection {
@@ -726,6 +753,9 @@ abstract class PdfTextSelection {
   bool get isCopyAllowed;
 
   /// Get the selected text.
+  ///
+  /// Although the use of this property is not restricted by [isCopyAllowed]
+  /// but you have to ensure that your use of the text does not violate [isCopyAllowed] condition.
   String get selectedText;
 
   /// Get the selected text range.
@@ -755,6 +785,129 @@ abstract class PdfTextSelectionDelegate implements PdfTextSelection {
   /// Please note that the position is in document coordinates.
   Future<void> selectWord(Offset position);
 }
+
+@immutable
+class PdfViewerSelectionMagnifierParams {
+  const PdfViewerSelectionMagnifierParams({
+    this.enabled,
+    this.width = 200.0,
+    this.height = 200.0,
+    this.scale = 4.0,
+    this.builder,
+    this.paintMagnifierContent,
+    this.shouldBeShown,
+    this.maxImageBytesCachedOnMemory = defaultMaxImageBytesCachedOnMemory,
+  });
+
+  /// The default maximum image bytes cached on memory is 256 KB.
+  static const defaultMaxImageBytesCachedOnMemory = 256 * 1024;
+
+  /// Whether the magnifier is enabled.
+  ///
+  /// If null, the magnifier is enabled by default on Mobile and disabled on Desktop/Web.
+  final bool? enabled;
+
+  /// Width of the widget to build (Not the size of the  magnifier content).
+  ///
+  /// The size is used to layout the magnifier widget.
+  final double width;
+
+  /// Height of the widget to build (Not the size of the  magnifier content).
+  ///
+  /// The size is used to layout the magnifier widget.
+  final double height;
+
+  /// Scale (zoom ratio) of the magnifier content.
+  final double scale;
+
+  /// Function to build the magnifier widget.
+  ///
+  /// The function can be used to decorate the magnifier widget with additional widgets such as [Container] or [Size].
+  /// The widget built by the function should be the exact size of specified by [width] and [height].
+  ///
+  /// If the function returns null, the magnifier is not shown.
+  /// If the function is null, the magnifier is shown with the default magnifier widget.
+  ///
+  /// If the function returns a widget of [Positioned] or [Align], the magnifier content is laid out as
+  /// specified. Otherwise, the widget is laid out automatically.
+  ///
+  /// The following fragment illustrates how to build a magnifier widget with a border and rounded corners:
+  ///
+  /// ```dart
+  /// builder: (context, params, magnifierContent) {
+  ///   return Container(
+  ///     width: params.width,
+  ///     height: params.height,
+  ///     decoration: BoxDecoration(
+  ///       borderRadius: BorderRadius.circular(16),
+  ///       boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8, spreadRadius: 2)],
+  ///     ),
+  ///     child: ClipRRect(borderRadius: BorderRadius.circular(15), child: child),
+  ///   );
+  /// }
+  /// ```
+  ///
+  /// You can also use the function to build a [OverlayEntry] to show the magnifier as an overlay. In that case,
+  /// you should do everything by yourself and return null from the function.
+  ///
+  final PdfViewerMagnifierBuilder? builder;
+
+  /// Function to paint the magnifier content.
+  final PdfViewerMagnifierContentPaintFunction? paintMagnifierContent;
+
+  /// Function to determine whether the magnifier should be shown based on conditions such as zoom level.
+  ///
+  /// If [enabled] is false, this function is not called.
+  /// By default, the magnifier is shown if the zoom level is smaller than [scale].
+  final PdfViewerMagnifierShouldBeShownFunction? shouldBeShown;
+
+  /// The maximum number of image bytes to be cached on memory.
+  ///
+  /// The default is 256 * 1024 bytes (256 KB).
+  final int maxImageBytesCachedOnMemory;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is PdfViewerSelectionMagnifierParams &&
+        other.enabled == enabled &&
+        other.width == width &&
+        other.height == height &&
+        other.scale == scale &&
+        other.builder == builder &&
+        other.paintMagnifierContent == paintMagnifierContent &&
+        other.shouldBeShown == shouldBeShown &&
+        other.maxImageBytesCachedOnMemory == maxImageBytesCachedOnMemory;
+  }
+
+  @override
+  int get hashCode =>
+      enabled.hashCode ^
+      width.hashCode ^
+      height.hashCode ^
+      scale.hashCode ^
+      builder.hashCode ^
+      paintMagnifierContent.hashCode ^
+      shouldBeShown.hashCode ^
+      maxImageBytesCachedOnMemory.hashCode;
+}
+
+/// Function to build the magnifier widget.
+typedef PdfViewerMagnifierBuilder =
+    Widget? Function(BuildContext context, PdfViewerSelectionMagnifierParams params, Widget magnifierContent);
+
+/// Function to paint the magnifier content.
+///
+/// The function is called to paint the magnifier content on the canvas.
+/// The [canvas] is the canvas to paint on, [size] is the size of the magnifier content,
+/// and [center] is the center position of the magnifier in the document coordinates.
+/// [params] is the magnifier parameters.
+typedef PdfViewerMagnifierContentPaintFunction =
+    void Function(Canvas canvas, Size size, Offset center, PdfViewerSelectionMagnifierParams params);
+
+/// Function to determine whether the magnifier should be shown or not.
+typedef PdfViewerMagnifierShouldBeShownFunction =
+    bool Function(PdfViewerController controller, PdfViewerSelectionMagnifierParams params);
 
 /// Function to notify that the document is loaded/changed.
 typedef PdfViewerDocumentChangedCallback = void Function(PdfDocument? document);
@@ -868,11 +1021,6 @@ typedef PdfLinkWidgetBuilder = Widget? Function(BuildContext context, PdfLink li
 ///   Paint()..color = Colors.red);
 /// ```
 typedef PdfViewerPagePaintCallback = void Function(ui.Canvas canvas, Rect pageRect, PdfPage page);
-
-/// Function to be notified when the text selection is changed.
-///
-/// [textSelection] contains the selected text range on each page.
-typedef PdfViewerTextSelectionChangeCallback = void Function(PdfTextSelection textSelection);
 
 /// When [PdfViewerController.goToPage] is called, the page is aligned to the specified anchor.
 ///

@@ -12,7 +12,6 @@ import 'package:synchronized/extension.dart';
 import 'package:web/web.dart' as web;
 
 import '../pdf_api.dart';
-import '../utils/unmodifiable_list.dart';
 
 /// Get [PdfDocumentFactory] backed by PDFium.
 ///
@@ -477,42 +476,17 @@ class _PdfPageWasm extends PdfPage {
   }
 
   @override
-  Future<PdfPageText> loadText() async {
+  Future<PdfPageRawText?> loadRawText() async {
     final result = await document.factory.sendCommand(
       'loadText',
       parameters: {'docHandle': document.document['docHandle'], 'pageIndex': pageNumber - 1},
     );
-    final fragmentOffsets = result['fragments'];
-    final charRectsAll = (result['charRects'] as List)
-        .map((rect) {
+    final charRectsAll =
+        (result['charRects'] as List).map((rect) {
           final r = rect as List;
           return PdfRect(r[0] as double, r[1] as double, r[2] as double, r[3] as double);
-        })
-        .toList(growable: false);
-    final fragments = <PdfPageTextFragment>[];
-    final pageText = _PdfPageTextJs(
-      pageNumber: pageNumber,
-      fullText: result['fullText'],
-      charRects: UnmodifiableListView(charRectsAll),
-      fragments: UnmodifiableListView(fragments),
-    );
-    if (fragmentOffsets is List) {
-      int pos = 0;
-      for (final fragment in fragmentOffsets.map((n) => (n as num).toInt())) {
-        final charRects = UnmodifiableSublist(charRectsAll, start: pos, end: pos + fragment);
-        fragments.add(
-          PdfPageTextFragment(
-            pageText: pageText,
-            index: pos,
-            length: fragment,
-            bounds: charRects.boundingRect(),
-            charRects: charRects,
-          ),
-        );
-        pos += fragment;
-      }
-    }
-    return pageText;
+        }).toList();
+    return PdfPageRawText(result['fullText'] as String, UnmodifiableListView(charRectsAll));
   }
 
   @override
@@ -595,20 +569,4 @@ PdfDest? _pdfDestFromMap(dynamic dest) {
     PdfDestCommand.parse(dest['command'] as String),
     params.map((p) => p as double).toList(),
   );
-}
-
-class _PdfPageTextJs extends PdfPageText {
-  _PdfPageTextJs({required this.pageNumber, required this.fullText, required this.charRects, required this.fragments});
-
-  @override
-  final int pageNumber;
-
-  @override
-  final String fullText;
-
-  @override
-  final List<PdfRect> charRects;
-
-  @override
-  final List<PdfPageTextFragment> fragments;
 }

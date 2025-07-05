@@ -318,6 +318,8 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                           pageAnchor: isHorizontalLayout ? PdfPageAnchor.left : PdfPageAnchor.top,
                           pageAnchorEnd: isHorizontalLayout ? PdfPageAnchor.right : PdfPageAnchor.bottom,
                           textSelectionParams: PdfTextSelectionParams(
+                            enableSelectionHandles: true,
+                            magnifier: PdfViewerSelectionMagnifierParams(enabled: true),
                             onTextSelectionChange: (textSelection) {
                               textSelections = textSelection.selectedTextRange;
                             },
@@ -460,17 +462,10 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
         ..color = marker.color.withAlpha(100)
         ..style = PaintingStyle.fill;
 
-      final f = PdfTextRangeWithFragments.fromTextRange(
-        marker.range.pageText,
-        marker.range.start,
-        marker.range.end,
+      canvas.drawRect(
+        marker.range.bounds.toRectInDocument(page: page, pageRect: pageRect),
+        paint,
       );
-      if (f != null) {
-        canvas.drawRect(
-          f.bounds.toRectInDocument(page: page, pageRect: pageRect),
-          paint,
-        );
-      }
     }
   }
 

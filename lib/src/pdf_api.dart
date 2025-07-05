@@ -12,6 +12,7 @@ import 'package:vector_math/vector_math_64.dart' hide Colors;
 // The trick to support Flutter Web is to use conditional import
 // Both of the files define PdfDocumentFactoryImpl class but only one of them is imported.
 import '../pdfrx.dart';
+import 'utils/unmodifiable_list.dart';
 import 'web/pdfrx_wasm.dart' if (dart.library.io) 'pdfium/pdfrx_pdfium.dart';
 
 /// Class to provide Pdfrx's configuration.
@@ -446,8 +447,211 @@ abstract class PdfPage {
   /// Create [PdfPageRenderCancellationToken] to cancel the rendering process.
   PdfPageRenderCancellationToken createCancellationToken();
 
+  static final reSpaces = RegExp(r'(\s+)', unicode: true);
+  static final reNewLine = RegExp(r'\r?\n', unicode: true);
+
   /// Load text.
-  Future<PdfPageText> loadText();
+  Future<PdfPageText> loadText() async {
+    final raw = await _loadFormattedText();
+    if (raw == null) {
+      return PdfPageText(pageNumber: pageNumber, fullText: '', charRects: [], fragments: []);
+    }
+    final inputCharRects = raw.charRects;
+    final inputFullText = raw.fullText;
+
+    final fragmentsTmp = <({int length, PdfTextDirection direction})>[];
+    final outputText = StringBuffer();
+    final outputCharRects = <PdfRect>[];
+
+    PdfTextDirection vector2direction(Vector2 v) {
+      if (v.x.abs() > v.y.abs()) {
+        return v.x > 0 ? PdfTextDirection.ltr : PdfTextDirection.rtl;
+      } else {
+        return PdfTextDirection.vrtl;
+      }
+    }
+
+    PdfTextDirection getLineDirection(int start, int end) {
+      if (start == end || start + 1 == end) return PdfTextDirection.unknown;
+      return vector2direction(inputCharRects[start].center.differenceTo(inputCharRects[end - 1].center));
+    }
+
+    void addWord(
+      int wordStart,
+      int wordEnd,
+      PdfTextDirection dir,
+      PdfRect bounds, {
+      bool isSpace = false,
+      bool isNewLine = false,
+    }) {
+      if (wordStart < wordEnd) {
+        final pos = outputText.length;
+        if (isSpace) {
+          if (wordStart > 0 && wordEnd < inputCharRects.length) {
+            // combine several spaces into one space
+            final a = inputCharRects[wordStart - 1];
+            final b = inputCharRects[wordEnd];
+            switch (dir) {
+              case PdfTextDirection.ltr:
+              case PdfTextDirection.unknown:
+                outputCharRects.add(PdfRect(a.right, bounds.top, b.left, bounds.bottom));
+              case PdfTextDirection.rtl:
+                outputCharRects.add(PdfRect(b.right, bounds.top, a.left, bounds.bottom));
+              case PdfTextDirection.vrtl:
+                outputCharRects.add(PdfRect(bounds.left, a.bottom, bounds.right, b.top));
+            }
+            outputText.write(' ');
+          }
+        } else if (isNewLine) {
+          if (wordStart > 0) {
+            // new line (\n)
+            switch (dir) {
+              case PdfTextDirection.ltr:
+              case PdfTextDirection.unknown:
+                outputCharRects.add(PdfRect(bounds.right, bounds.top, bounds.right, bounds.bottom));
+              case PdfTextDirection.rtl:
+                outputCharRects.add(PdfRect(bounds.left, bounds.top, bounds.left, bounds.bottom));
+              case PdfTextDirection.vrtl:
+                outputCharRects.add(PdfRect(bounds.left, bounds.bottom, bounds.right, bounds.bottom));
+            }
+            outputText.write('\n');
+          }
+        } else {
+          // Adjust character bounding box based on text direction.
+          switch (dir) {
+            case PdfTextDirection.ltr:
+            case PdfTextDirection.rtl:
+            case PdfTextDirection.unknown:
+              for (int i = wordStart; i < wordEnd; i++) {
+                final r = inputCharRects[i];
+                outputCharRects.add(PdfRect(r.left, bounds.top, r.right, bounds.bottom));
+              }
+            case PdfTextDirection.vrtl:
+              for (int i = wordStart; i < wordEnd; i++) {
+                final r = inputCharRects[i];
+                outputCharRects.add(PdfRect(bounds.left, r.top, bounds.right, r.bottom));
+              }
+          }
+          outputText.write(inputFullText.substring(wordStart, wordEnd));
+        }
+        if (outputText.length > pos) fragmentsTmp.add((length: outputText.length - pos, direction: dir));
+      }
+    }
+
+    int addWords(int start, int end, PdfTextDirection dir, PdfRect bounds) {
+      final firstIndex = fragmentsTmp.length;
+      final matches = reSpaces.allMatches(inputFullText.substring(start, end));
+      int wordStart = start;
+      for (final match in matches) {
+        final spaceStart = start + match.start;
+        addWord(wordStart, spaceStart, dir, bounds);
+        wordStart = start + match.end;
+        addWord(spaceStart, wordStart, dir, bounds, isSpace: true);
+      }
+      addWord(wordStart, end, dir, bounds);
+      return fragmentsTmp.length - firstIndex;
+    }
+
+    int lineStart = 0;
+    for (final match in reNewLine.allMatches(inputFullText)) {
+      if (lineStart < match.start) {
+        final dir = getLineDirection(lineStart, match.start);
+        final bounds = inputCharRects.boundingRect(start: lineStart, end: match.start);
+        addWords(lineStart, match.start, dir, bounds);
+        addWord(match.start, match.end, dir, bounds, isNewLine: true);
+      } else {
+        outputCharRects.add(outputCharRects.last);
+        outputText.write('\n');
+      }
+      lineStart = match.end;
+    }
+    if (lineStart < inputFullText.length) {
+      addWords(
+        lineStart,
+        inputFullText.length,
+        getLineDirection(lineStart, inputFullText.length),
+        inputCharRects.boundingRect(start: lineStart, end: inputFullText.length),
+      );
+    }
+
+    final fragments = <PdfPageTextFragment>[];
+    final text = PdfPageText(
+      pageNumber: pageNumber,
+      fullText: outputText.toString(),
+      charRects: outputCharRects,
+      fragments: UnmodifiableListView(fragments),
+    );
+
+    int start = 0;
+    for (int i = 0; i < fragmentsTmp.length; i++) {
+      final length = fragmentsTmp[i].length;
+      final direction = fragmentsTmp[i].direction;
+      final end = start + length;
+      final fragmentRects = UnmodifiableSublist(outputCharRects, start: start, end: end);
+      fragments.add(
+        PdfPageTextFragment(
+          pageText: text,
+          index: start,
+          length: length,
+          charRects: fragmentRects,
+          bounds: fragmentRects.boundingRect(),
+          direction: direction,
+        ),
+      );
+      start = end;
+    }
+
+    return text;
+  }
+
+  Future<PdfPageRawText?> _loadFormattedText() async {
+    final raw = await loadRawText();
+    if (raw == null) {
+      return null;
+    }
+
+    final fullText = StringBuffer();
+    final charRects = <PdfRect>[];
+
+    // Process the whole text
+    final lnMatches = reNewLine.allMatches(raw.fullText).toList();
+    int lineStart = 0;
+    int prevEnd = 0;
+    for (int i = 0; i < lnMatches.length; i++) {
+      lineStart = prevEnd;
+      final match = lnMatches[i];
+      fullText.write(raw.fullText.substring(lineStart, match.start));
+      charRects.addAll(raw.charRects.sublist(lineStart, match.start));
+      prevEnd = match.end;
+
+      // Microsoft Word sometimes outputs vertical text like this: "縦\n書\nき\nの\nテ\nキ\nス\nト\nで\nす\n。\n"
+      // And, we want to remove these line-feeds.
+      if (i + 1 < lnMatches.length) {
+        final next = lnMatches[i + 1];
+        final len = match.start - lineStart;
+        final nextLen = next.start - match.end;
+        if (len == 1 && nextLen == 1) {
+          final rect = raw.charRects[lineStart];
+          final nextRect = raw.charRects[match.end];
+          final nextCenterX = nextRect.center.x;
+          if (rect.left < nextCenterX && nextCenterX < rect.right && rect.top > nextRect.top) {
+            // The line is vertical, and the line-feed is virtual
+            continue;
+          }
+        }
+      }
+      fullText.write(raw.fullText.substring(match.start, match.end));
+      charRects.addAll(raw.charRects.sublist(match.start, match.end));
+    }
+    if (prevEnd < raw.fullText.length) {
+      fullText.write(raw.fullText.substring(prevEnd));
+      charRects.addAll(raw.charRects.sublist(prevEnd));
+    }
+    return PdfPageRawText(fullText.toString(), charRects);
+  }
+
+  /// Load raw text and its associated character bounding boxes.
+  Future<PdfPageRawText?> loadRawText();
 
   /// Load links.
   ///
@@ -458,6 +662,17 @@ abstract class PdfPage {
   /// This is useful if the PDF file contains text that looks like Web links but not defined as links in the PDF.
   /// The default is true.
   Future<List<PdfLink>> loadLinks({bool compact = false, bool enableAutoLinkDetection = true});
+}
+
+/// PDF's raw text and its associated character bounding boxes.
+class PdfPageRawText {
+  PdfPageRawText(this.fullText, this.charRects);
+
+  /// Full text of the page.
+  final String fullText;
+
+  /// Bounds corresponding to characters in the full text.
+  final List<PdfRect> charRects;
 }
 
 /// Page rotation.
@@ -563,21 +778,29 @@ abstract class PdfImage {
 /// Handles text extraction from PDF page.
 ///
 /// See [PdfPage.loadText].
-abstract class PdfPageText {
+@immutable
+class PdfPageText {
+  const PdfPageText({
+    required this.pageNumber,
+    required this.fullText,
+    required this.charRects,
+    required this.fragments,
+  });
+
   /// Page number. The first page is 1.
-  int get pageNumber;
+  final int pageNumber;
 
   /// Full text of the page.
-  String get fullText;
+  final String fullText;
 
   /// Bounds corresponding to characters in the full text.
-  List<PdfRect> get charRects;
+  final List<PdfRect> charRects;
 
   /// Get text fragments that organizes the full text structure.
   ///
   /// The [fullText] is the composed result of all fragments' text.
   /// Any character in [fullText] must be included in one of the fragments.
-  List<PdfPageTextFragment> get fragments;
+  final List<PdfPageTextFragment> fragments;
 
   /// Find text fragment index for the specified text index.
   ///
@@ -594,6 +817,7 @@ abstract class PdfPageText {
       length: 0,
       bounds: PdfRect.empty,
       charRects: const [],
+      direction: PdfTextDirection.unknown,
     );
     final index = fragments.lowerBound(searchIndex, (a, b) => a.index - b.index);
     if (index > fragments.length) {
@@ -614,54 +838,19 @@ abstract class PdfPageText {
     return index;
   }
 
-  /// Guess the text direction of the specified range.
-  PdfTextDirection guessTextDirectionOfRange(int start, int end) {
-    if (start < 0 || start >= fullText.length) {
-      throw RangeError.range(start, 0, fullText.length, 'start', 'Invalid start index');
+  PdfPageTextFragment? getFragmentForTextIndex(int textIndex) {
+    final index = getFragmentIndexForTextIndex(textIndex);
+    if (index < 0 || index >= fragments.length) {
+      return null; // range error
     }
-    if (end < start || end > fullText.length) {
-      throw RangeError.range(end, start, fullText.length, 'end', 'Invalid end index');
-    }
-    final scores = <int, int>{};
-    for (int i = start; i < end;) {
-      final ln = fullText.indexOf('\n', i);
-      final end = ln < 0 ? fullText.length : ln;
-      final dir = _getLineDirection(i, end);
-      if (dir != PdfTextDirection.unknown) {
-        scores[dir.index] = (scores[dir.index] ?? 0) + (end - i);
-      }
-      i = end + 1;
-    }
-    int maxScore = 0;
-    PdfTextDirection maxDir = PdfTextDirection.unknown;
-    for (int i = 0; i < PdfTextDirection.values.length; i++) {
-      final score = scores[i] ?? 0;
-      if (score > maxScore) {
-        maxScore = score;
-        maxDir = PdfTextDirection.values[i];
-      }
-    }
-    return maxDir;
-  }
-
-  PdfTextDirection _getLineDirection(int start, int end) {
-    if (start == end || start + 1 == end) return PdfTextDirection.unknown;
-    return _vector2direction(charRects[start].center.differenceTo(charRects[end - 1].center));
-  }
-
-  static PdfTextDirection _vector2direction(Vector2 v) {
-    if (v.x.abs() > v.y.abs()) {
-      return v.x > 0 ? PdfTextDirection.ltr : PdfTextDirection.rtl;
-    } else {
-      return PdfTextDirection.vrtl;
-    }
+    return fragments[index];
   }
 
   /// Search text with [pattern].
   ///
-  /// Just work like [Pattern.allMatches] but it returns stream of [PdfTextRangeWithFragments].
+  /// Just work like [Pattern.allMatches] but it returns stream of [PdfPageTextRange].
   /// [caseInsensitive] is used to specify case-insensitive search only if [pattern] is [String].
-  Stream<PdfTextRangeWithFragments> allMatches(Pattern pattern, {bool caseInsensitive = true}) async* {
+  Stream<PdfPageTextRange> allMatches(Pattern pattern, {bool caseInsensitive = true}) async* {
     final String text;
     if (pattern is RegExp) {
       caseInsensitive = pattern.isCaseSensitive;
@@ -675,11 +864,17 @@ abstract class PdfPageText {
     final matches = pattern.allMatches(text);
     for (final match in matches) {
       if (match.start == match.end) continue;
-      final m = PdfTextRangeWithFragments.fromTextRange(this, match.start, match.end);
-      if (m != null) {
-        yield m;
-      }
+      final m = PdfPageTextRange(pageText: this, start: match.start, end: match.end);
+      yield m;
     }
+  }
+
+  /// Create a [PdfPageTextRange] from two character indices.
+  ///
+  /// Unlike [PdfPageTextRange.end], both [a] and [b] are inclusive character indices in [fullText] and
+  /// [a] and [b] can be in any order (e
+  PdfPageTextRange getRangeFromAB(int a, int b) {
+    return PdfPageTextRange(pageText: this, start: min(a, b), end: max(a, b) + 1);
   }
 }
 
@@ -699,6 +894,7 @@ class PdfPageTextFragment {
     required this.length,
     required this.bounds,
     required this.charRects,
+    required this.direction,
   });
 
   /// Owner of the fragment.
@@ -716,38 +912,14 @@ class PdfPageTextFragment {
   /// Bounds of the text fragment in PDF page coordinates.
   final PdfRect bounds;
 
-  /// Fragment's child character bounding boxes in PDF page coordinates.
+  /// The fragment's child character bounding boxes in PDF page coordinates.
   final List<PdfRect> charRects;
+
+  /// Text direction of the fragment.
+  final PdfTextDirection direction;
 
   /// Text for the fragment.
   String get text => pageText.fullText.substring(index, index + length);
-
-  /// Get the bounds of the subrange of the text fragment.
-  ///
-  /// If the specified range is out of bounds, it returns null.
-  PdfRect? getBoundsForRange({int? start, int? end, double? widthForEmpty}) {
-    start ??= 0;
-    end ??= length;
-    if (start < 0 || start >= length) {
-      throw RangeError.range(start, 0, length, 'start', 'Invalid start index');
-    }
-    if (end < start || end > length) {
-      throw RangeError.range(end, start, length, 'end', 'Invalid end index');
-    }
-    if (start == end) {
-      if (widthForEmpty == null) return null; // empty range
-      final cur = charRects[start];
-      final next = charRects[start + 1];
-      final w = next.left - cur.right;
-      final h = next.bottom - cur.top; // the Y-coord is bottom-up
-      if (w > h) {
-        return PdfRect(cur.left, cur.top, cur.left + widthForEmpty, cur.bottom);
-      } else {
-        return PdfRect(cur.left, cur.top, cur.right, cur.top - widthForEmpty);
-      }
-    }
-    return charRects.skip(start).take(end - start).boundingRect();
-  }
 
   @override
   bool operator ==(covariant PdfPageTextFragment other) {
@@ -770,11 +942,6 @@ class PdfPageTextRange {
   /// [start] is inclusive and [end] is exclusive.
   const PdfPageTextRange({required this.pageText, required this.start, required this.end});
 
-  /// Create a [PdfPageTextRange] from two character indices.
-  ///
-  /// Unlike `end` in [PdfTextRangeWithFragments], both [a] and [b] are inclusive.
-  PdfPageTextRange.fromAB(int a, int b, {required this.pageText}) : start = min(a, b), end = max(a, b) + 1;
-
   /// The page text the text range are associated with.
   final PdfPageText pageText;
 
@@ -787,163 +954,46 @@ class PdfPageTextRange {
   /// Page number of the text range.
   int get pageNumber => pageText.pageNumber;
 
-  /// Convert to [PdfTextRangeWithFragments].
-  ///
-  /// The method is used to convert [PdfPageTextRange] to [PdfTextRangeWithFragments].
-  PdfTextRangeWithFragments? toTextRangeWithFragments() =>
-      PdfTextRangeWithFragments.fromTextRange(pageText, start, end);
-
-  /// Bounds of the text range.
-  PdfRect get bounds => toTextRangeWithFragments()!.bounds;
-
   /// The composed text of the text range.
   String get text => pageText.fullText.substring(start, end);
-}
 
-/// Text range (start/end index) in PDF page and it's associated text and bounding rectangle.
-class PdfTextRangeWithFragments {
-  PdfTextRangeWithFragments(this.fragments, this.start, this.end, this.bounds);
+  PdfRect get bounds => pageText.charRects.boundingRect(start: start, end: end);
 
-  /// Page number of the page.
-  int get pageNumber => fragments.first.pageText.pageNumber;
-
-  /// Page text of the page.
-  PdfPageText get pageText => fragments.first.pageText;
-
-  /// Fragments that contains the text.
-  final List<PdfPageTextFragment> fragments;
-
-  /// In-fragment text start index on the first fragment ([fragments.first]).
-  final int start;
-
-  /// In-fragment text end index on the last fragment ([fragments.last]).
-  final int end;
-
-  /// Bounding rectangle of the text.
-  final PdfRect bounds;
-
-  /// The first character's bounding rectangle.
-  ///
-  /// If the first fragment does not have character level bounding rectangles,
-  /// it returns the bounds of the first fragment.
-  ///
-  /// The function is useful when you implement text selection algorithm or such.
-  PdfRect get startCharRect {
-    final firstFragment = fragments.first;
-    if (firstFragment.charRects.isEmpty) {
-      return firstFragment.bounds;
-    }
-    return firstFragment.charRects[start];
+  int get firstFragmentIndex {
+    return pageText.getFragmentIndexForTextIndex(start);
   }
 
-  /// The last character's bounding rectangle.
-  ///
-  /// If the last fragment does not have character level bounding rectangles,
-  /// it returns the bounds of the last fragment.
-  ///
-  /// The function is useful when you implement text selection algorithm or such.
-  PdfRect get endCharRect {
-    final lastFragment = fragments.last;
-    if (lastFragment.charRects.isEmpty) {
-      return lastFragment.bounds;
-    }
-    return lastFragment.charRects[end - 1];
+  int get lastFragmentIndex {
+    return pageText.getFragmentIndexForTextIndex(end - 1);
   }
 
-  /// Enumerate all the character bounding rectangles for the text range.
+  PdfPageTextFragment? get firstFragment {
+    final index = firstFragmentIndex;
+    if (index < 0 || index >= pageText.fragments.length) {
+      return null; // range error
+    }
+    return pageText.fragments[index];
+  }
+
+  PdfPageTextFragment? get lastFragment {
+    final index = lastFragmentIndex;
+    if (index < 0 || index >= pageText.fragments.length) {
+      return null; // range error
+    }
+    return pageText.fragments[index];
+  }
+
+  /// Enumerate all the fragment bounding rectangles for the text range.
   ///
   /// The function is useful when you implement text selection algorithm or such.
-  Iterable<PdfRect> enumerateRectsForRange({int? start, int? end, double? widthForEmpty}) sync* {
-    start ??= fragments.first.index + this.start;
-    end ??= fragments.last.index + this.end;
-    for (final f in fragments) {
+  Iterable<PdfTextFragmentBoundingRect> enumerateFragmentBoundingRects() sync* {
+    final fStart = firstFragmentIndex;
+    final fEnd = lastFragmentIndex;
+    for (int i = fStart; i <= fEnd; i++) {
+      final f = pageText.fragments[i];
       if (f.end <= start || end <= f.index) continue;
-      final s = max(start - f.index, 0);
-      final e = min(end - f.index, f.length);
-      yield f.getBoundsForRange(start: s, end: e, widthForEmpty: widthForEmpty)!;
+      yield PdfTextFragmentBoundingRect(f, max(start - f.index, 0), min(end - f.index, f.length));
     }
-  }
-
-  /// Create [PdfTextRangeWithFragments] from text range in [PdfPageText].
-  ///
-  /// When you implement search-to-highlight feature, the most easiest way is to use [PdfTextSearcher] but you can
-  /// of course implement your own search algorithm and use this method to create [PdfTextRangeWithFragments]:
-  ///
-  /// ```dart
-  /// PdfPageText pageText = ...;
-  /// final searchPattern = 'search text';
-  /// final textIndex = pageText.fullText.indexOf(searchPattern);
-  /// if (textIndex >= 0) {
-  ///  final range = PdfTextRangeWithFragments.fromTextRange(pageText, textIndex, textIndex + searchPattern.length);
-  ///  ...
-  /// }
-  /// ```
-  ///
-  /// To paint text highlights on PDF pages, see [PdfViewerParams.pagePaintCallbacks] and [PdfViewerPagePaintCallback].
-  static PdfTextRangeWithFragments? fromTextRange(PdfPageText pageText, int start, [int? end]) {
-    end ??= pageText.fullText.length;
-    if (start >= end) {
-      return null;
-    }
-    final s = pageText.getFragmentIndexForTextIndex(start);
-    final sf = pageText.fragments[s];
-    if (start + 1 == end) {
-      return PdfTextRangeWithFragments(
-        [pageText.fragments[s]],
-        start - sf.index,
-        end - sf.index,
-        sf.charRects.skip(start - sf.index).take(end - start).boundingRect(),
-      );
-    }
-
-    final l = pageText.getFragmentIndexForTextIndex(end);
-    if (s == l) {
-      return PdfTextRangeWithFragments(
-        [pageText.fragments[s]],
-        start - sf.index,
-        end - sf.index,
-        sf.charRects.skip(start - sf.index).take(end - start).boundingRect(),
-      );
-    }
-
-    var bounds = sf.charRects.skip(start - sf.index).boundingRect();
-    for (int i = s + 1; i < l; i++) {
-      bounds = bounds.merge(pageText.fragments[i].bounds);
-    }
-    if (l == pageText.fragments.length) {
-      return PdfTextRangeWithFragments(
-        pageText.fragments.sublist(s),
-        start - sf.index,
-        pageText.fragments.last.length,
-        bounds,
-      );
-    }
-
-    final lf = pageText.fragments[l];
-    final containLastFragment = end > lf.index;
-    if (containLastFragment) {
-      bounds = bounds.merge(lf.charRects.take(end - lf.index).boundingRect());
-    }
-
-    return PdfTextRangeWithFragments(
-      pageText.fragments.sublist(s, containLastFragment ? l + 1 : l),
-      start - sf.index,
-      containLastFragment ? end - lf.index : end - pageText.fragments[l - 1].index,
-      bounds,
-    );
-  }
-
-  @override
-  int get hashCode => pageNumber ^ start ^ end;
-
-  @override
-  bool operator ==(Object other) {
-    return other is PdfTextRangeWithFragments &&
-        other.pageNumber == pageNumber &&
-        other.start == start &&
-        other.end == end &&
-        other.bounds == bounds &&
-        listEquals(other.fragments, fragments);
   }
 }
 
@@ -1127,13 +1177,15 @@ extension RectPdfRectExt on Rect {
 
 /// Extension methods for List of [PdfRect].
 extension PdfRectsExt on Iterable<PdfRect> {
-  /// Merge all rectangles to calculate bounding rectangle.
-  PdfRect boundingRect() {
+  /// Calculate the bounding rectangle of the list of rectangles.
+  PdfRect boundingRect({int? start, int? end}) {
+    start ??= 0;
+    end ??= length;
     var left = double.infinity;
     var top = double.negativeInfinity;
     var right = double.negativeInfinity;
     var bottom = double.infinity;
-    for (final r in this) {
+    for (final r in skip(start).take(end - start)) {
       if (r.left < left) {
         left = r.left;
       }
@@ -1153,6 +1205,38 @@ extension PdfRectsExt on Iterable<PdfRect> {
     }
     return PdfRect(left, top, right, bottom);
   }
+}
+
+/// Bounding rectangle for a text range in a PDF page.
+class PdfTextFragmentBoundingRect {
+  const PdfTextFragmentBoundingRect(this.fragment, this.sif, this.eif);
+
+  /// Associated text fragment.
+  final PdfPageTextFragment fragment;
+
+  /// In fragment text start index (Start-In-Fragment)
+  ///
+  /// It is the character index in the [PdfPageTextFragment.charRects]/[PdfPageTextFragment.text]
+  /// of the associated [fragment].
+  final int sif;
+
+  /// In fragment text end index (End-In-Fragment).
+  ///
+  /// It is the end character index in the [PdfPageTextFragment.charRects]/[PdfPageTextFragment.text]
+  /// of the associated [fragment].
+  final int eif;
+
+  /// Rectangle in PDF page coordinates.
+  PdfRect get bounds => fragment.pageText.charRects.boundingRect(start: start, end: end);
+
+  /// Start index of the text range in page's full text.
+  int get start => fragment.index + sif;
+
+  /// End index of the text range in page's full text.
+  int get end => fragment.index + eif;
+
+  /// Text direction of the text range.
+  PdfTextDirection get direction => fragment.direction;
 }
 
 /// PDF [Explicit Destination](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#page=374) the page and inner-page location to jump to.
