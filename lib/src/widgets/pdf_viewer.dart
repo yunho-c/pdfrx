@@ -817,7 +817,9 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
                   page: page,
                   pageRect: rectExternal,
                   onTextSelectionChange: _onSelectionChange,
-                  selectionColor: DefaultSelectionStyle.of(context).selectionColor!,
+                  selectionColor:
+                      DefaultSelectionStyle.of(context).selectionColor ??
+                      Colors.blue.withAlpha(100),
                 ),
               ),
             ),
