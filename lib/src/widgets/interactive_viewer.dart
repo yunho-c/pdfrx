@@ -484,6 +484,11 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
   double _currentRotation = 0.0; // Rotation of _transformationController.value.
   _GestureType? _gestureType;
 
+  // A recognizer for touch gestures.
+  late final ScaleGestureRecognizer _touchScaleRecognizer;
+  // A recognizer for trackpad gestures.
+  late final PanGestureRecognizer _trackpadPanRecognizer;
+
   // TODO(justinmc): Add rotateEnabled parameter to the widget and remove this
   // hardcoded value when the rotation feature is implemented.
   // https://github.com/flutter/flutter/issues/57698
@@ -847,50 +852,81 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
     }
   }
 
+  void _onTrackpadPanStart(DragStartDetails details) {
+    _controller.stop();
+    widget.onInteractionStart?.call(
+      ScaleStartDetails(focalPoint: details.globalPosition, localFocalPoint: details.localPosition),
+    );
+  }
+
+  void _onTrackpadPanUpdate(DragUpdateDetails details) {
+    if (!widget.panEnabled) {
+      widget.onInteractionUpdate?.call(
+        ScaleUpdateDetails(
+          focalPoint: details.globalPosition,
+          localFocalPoint: details.localPosition,
+          focalPointDelta: details.delta,
+          scale: 1.0,
+          rotation: 0.0,
+        ),
+      );
+      return;
+    }
+    // The delta is inverted for trackpad scrolling.
+    _transformer.value = _matrixTranslate(_transformer.value, details.delta.scale(-1.0, -1.0));
+    widget.onInteractionUpdate?.call(
+      ScaleUpdateDetails(
+        focalPoint: details.globalPosition,
+        localFocalPoint: details.localPosition,
+        focalPointDelta: details.delta,
+        scale: 1.0,
+        rotation: 0.0,
+      ),
+    );
+  }
+
+  void _onTrackpadPanEnd(DragEndDetails details) {
+    widget.onInteractionEnd?.call(ScaleEndDetails(velocity: details.velocity, pointerCount: 0));
+
+    const double velocityMultiplier = 1.0;
+    final Velocity amplifiedVelocity = Velocity(
+      pixelsPerSecond:
+          Offset(details.velocity.pixelsPerSecond.dx, details.velocity.pixelsPerSecond.dy) * velocityMultiplier,
+    );
+
+    // The velocity is inverted for trackpad scrolling.
+    final Velocity invertedVelocity = Velocity(pixelsPerSecond: amplifiedVelocity.pixelsPerSecond.scale(-1.0, -1.0));
+    if (invertedVelocity.pixelsPerSecond.distance < kMinFlingVelocity) {
+      return;
+    }
+    final Vector3 translationVector = _transformer.value.getTranslation();
+    final Offset translation = Offset(translationVector.x, translationVector.y);
+    final FrictionSimulation frictionSimulationX = FrictionSimulation(
+      widget.interactionEndFrictionCoefficient,
+      translation.dx,
+      invertedVelocity.pixelsPerSecond.dx,
+    );
+    final FrictionSimulation frictionSimulationY = FrictionSimulation(
+      widget.interactionEndFrictionCoefficient,
+      translation.dy,
+      invertedVelocity.pixelsPerSecond.dy,
+    );
+    final double tFinal = _getFinalTime(
+      invertedVelocity.pixelsPerSecond.distance,
+      widget.interactionEndFrictionCoefficient,
+    );
+    _animation = Tween<Offset>(
+      begin: translation,
+      end: Offset(frictionSimulationX.finalX, frictionSimulationY.finalX),
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.decelerate));
+    _controller.duration = Duration(milliseconds: (tFinal * 1000).round());
+    _animation!.addListener(_handleInertiaAnimation);
+    _controller.forward();
+  }
+
   // Handle mousewheel and web trackpad scroll events.
   void _receivedPointerSignal(PointerSignalEvent event) {
-    final Offset local = event.localPosition;
-    final Offset global = event.position;
-    final double scaleChange;
     if (event is PointerScrollEvent) {
-      if (event.kind == PointerDeviceKind.trackpad && !widget.trackpadScrollCausesScale) {
-        // Trackpad scroll, so treat it as a pan.
-        widget.onInteractionStart?.call(ScaleStartDetails(focalPoint: global, localFocalPoint: local));
-
-        final Offset localDelta = PointerEvent.transformDeltaViaPositions(
-          untransformedEndPosition: global + event.scrollDelta,
-          untransformedDelta: event.scrollDelta,
-          transform: event.transform,
-        );
-
-        if (!_gestureIsSupported(_GestureType.pan)) {
-          widget.onInteractionUpdate?.call(
-            ScaleUpdateDetails(
-              focalPoint: global - event.scrollDelta,
-              localFocalPoint: local - event.scrollDelta,
-              focalPointDelta: -localDelta,
-            ),
-          );
-          widget.onInteractionEnd?.call(ScaleEndDetails());
-          return;
-        }
-
-        final Offset focalPointScene = _transformer.toScene(local);
-        final Offset newFocalPointScene = _transformer.toScene(local - localDelta);
-
-        _transformer.value = _matrixTranslate(_transformer.value, newFocalPointScene - focalPointScene);
-
-        widget.onInteractionUpdate?.call(
-          ScaleUpdateDetails(
-            focalPoint: global - event.scrollDelta,
-            localFocalPoint: local - localDelta,
-            focalPointDelta: -localDelta,
-          ),
-        );
-        widget.onInteractionEnd?.call(ScaleEndDetails());
-        return;
-      }
-
       // We can handle mouse-wheel event here for our own purposes
       if (widget.onWheelDelta != null) {
         widget.onWheelDelta!(event.scrollDelta);
@@ -901,34 +937,32 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
       if (event.scrollDelta.dy == 0.0) {
         return;
       }
-      scaleChange = math.exp(-event.scrollDelta.dy / widget.scaleFactor);
-    } else if (event is PointerScaleEvent) {
-      scaleChange = event.scale;
-    } else {
-      return;
-    }
-    widget.onInteractionStart?.call(ScaleStartDetails(focalPoint: global, localFocalPoint: local));
+      final double scaleChange = math.exp(-event.scrollDelta.dy / widget.scaleFactor);
+      widget.onInteractionStart?.call(
+        ScaleStartDetails(focalPoint: event.position, localFocalPoint: event.localPosition),
+      );
 
-    if (!_gestureIsSupported(_GestureType.scale)) {
+      if (!_gestureIsSupported(_GestureType.scale)) {
+        widget.onInteractionUpdate?.call(
+          ScaleUpdateDetails(focalPoint: event.position, localFocalPoint: event.localPosition, scale: scaleChange),
+        );
+        widget.onInteractionEnd?.call(ScaleEndDetails());
+        return;
+      }
+
+      final Offset focalPointScene = _transformer.toScene(event.localPosition);
+      _transformer.value = _matrixScale(_transformer.value, scaleChange);
+
+      // After scaling, translate such that the event's position is at the
+      // same scene point before and after the scale.
+      final Offset focalPointSceneScaled = _transformer.toScene(event.localPosition);
+      _transformer.value = _matrixTranslate(_transformer.value, focalPointSceneScaled - focalPointScene);
+
       widget.onInteractionUpdate?.call(
-        ScaleUpdateDetails(focalPoint: global, localFocalPoint: local, scale: scaleChange),
+        ScaleUpdateDetails(focalPoint: event.position, localFocalPoint: event.localPosition, scale: scaleChange),
       );
       widget.onInteractionEnd?.call(ScaleEndDetails());
-      return;
     }
-
-    final Offset focalPointScene = _transformer.toScene(local);
-    _transformer.value = _matrixScale(_transformer.value, scaleChange);
-
-    // After scaling, translate such that the event's position is at the
-    // same scene point before and after the scale.
-    final Offset focalPointSceneScaled = _transformer.toScene(local);
-    _transformer.value = _matrixTranslate(_transformer.value, focalPointSceneScaled - focalPointScene);
-
-    widget.onInteractionUpdate?.call(
-      ScaleUpdateDetails(focalPoint: global, localFocalPoint: local, scale: scaleChange),
-    );
-    widget.onInteractionEnd?.call(ScaleEndDetails());
   }
 
   void _handleInertiaAnimation() {
@@ -982,6 +1016,22 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
     _scaleController = AnimationController(vsync: this);
 
     _transformer.addListener(_handleTransformation);
+
+    _touchScaleRecognizer =
+        ScaleGestureRecognizer(supportedDevices: {PointerDeviceKind.touch, PointerDeviceKind.stylus})
+          ..onStart = _onScaleStart
+          ..onUpdate = _onScaleUpdate
+          ..onEnd = _onScaleEnd;
+
+    _trackpadPanRecognizer =
+        PanGestureRecognizer(
+            // dragStartBehavior: DragStartBehavior.down,
+            supportedDevices: {PointerDeviceKind.trackpad},
+          )
+          ..onStart = _onTrackpadPanStart
+          ..onUpdate = _onTrackpadPanUpdate
+          ..onEnd = _onTrackpadPanEnd
+          ..velocityTrackerBuilder = (event) => IOSScrollViewFlingVelocityTracker(PointerDeviceKind.trackpad);
   }
 
   @override
@@ -1004,6 +1054,8 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
   void dispose() {
     _controller.dispose();
     _scaleController.dispose();
+    _touchScaleRecognizer.dispose();
+    _trackpadPanRecognizer.dispose();
     _transformer.removeListener(_handleTransformation);
     if (widget.transformationController == null) {
       _transformer.dispose();
@@ -1043,18 +1095,20 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
       );
     }
 
-    return Listener(
+    return RawGestureDetector(
       key: _parentKey,
-      onPointerSignal: _receivedPointerSignal,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque, // Necessary when panning off screen.
-        onScaleEnd: _onScaleEnd,
-        onScaleStart: _onScaleStart,
-        onScaleUpdate: _onScaleUpdate,
-        trackpadScrollCausesScale: widget.trackpadScrollCausesScale,
-        trackpadScrollToScaleFactor: Offset(0, -1 / widget.scaleFactor),
-        child: child,
-      ),
+      gestures: <Type, GestureRecognizerFactory>{
+        ScaleGestureRecognizer: GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
+          () => _touchScaleRecognizer,
+          (instance) {},
+        ),
+        PanGestureRecognizer: GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
+          () => _trackpadPanRecognizer,
+          (instance) {},
+        ),
+      },
+      behavior: HitTestBehavior.opaque,
+      child: Listener(onPointerSignal: _receivedPointerSignal, child: child),
     );
   }
 }
