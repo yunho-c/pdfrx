@@ -62,6 +62,7 @@ class PdfViewerParams {
     this.onKey,
     this.keyHandlerParams = const PdfViewerKeyHandlerParams(),
     this.forceReload = false,
+    this.debugShowTextFragments = false,
   });
 
   /// Margin around the page.
@@ -484,6 +485,9 @@ class PdfViewerParams {
   /// sometimes it is useful to force reload the viewer by setting this to true.
   final bool forceReload;
 
+  /// If true, it shows the text fragments for debugging purpose.
+  final bool debugShowTextFragments;
+
   /// Determine whether the viewer needs to be reloaded or not.
   ///
   bool doChangesRequireReload(PdfViewerParams? other) {
@@ -567,7 +571,8 @@ class PdfViewerParams {
         other.pageBackgroundPaintCallbacks == pageBackgroundPaintCallbacks &&
         other.onKey == onKey &&
         other.keyHandlerParams == keyHandlerParams &&
-        other.forceReload == forceReload;
+        other.forceReload == forceReload &&
+        other.debugShowTextFragments == debugShowTextFragments;
   }
 
   @override
@@ -618,7 +623,8 @@ class PdfViewerParams {
         pageBackgroundPaintCallbacks.hashCode ^
         onKey.hashCode ^
         keyHandlerParams.hashCode ^
-        forceReload.hashCode;
+        forceReload.hashCode ^
+        debugShowTextFragments.hashCode;
   }
 }
 

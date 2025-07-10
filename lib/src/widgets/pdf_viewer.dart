@@ -980,6 +980,18 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
             );
           }
         }
+        if (widget.params.debugShowTextFragments) {
+          final paint = Paint()
+            ..color = Colors.red.withOpacity(0.5)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.0;
+          for (final fragment in text.fragments) {
+            canvas.drawRect(
+              fragment.bounds.toRectInDocument(page: page, pageRect: rect),
+              paint,
+            );
+          }
+        }
       }
 
       if (_canvasLinkPainter.isEnabled) {
